@@ -96,14 +96,20 @@ is_user_admin() {
 
 validate_username() {
     local username="$1"
-    # Check username length
+    
+    # Check if username is empty
+    if [[ -z "$username" ]]; then
+        error_exit "Username cannot be empty"
+    fi
+    
+    # Check username length (3-32 chars)
     if [[ ${#username} -lt 3 || ${#username} -gt 32 ]]; then
         error_exit "Username must be between 3 and 32 characters long"
     fi
     
-    # Check username format
-    if [[ ! "$username" =~ ^[a-z][-a-z0-9]*$ ]]; then
-        error_exit "Invalid username. Use only lowercase letters, numbers, and hyphens. Must start with a letter"
+    # Check username format (starts with lowercase letter, followed by lowercase letters, numbers, or hyphens)
+    if [[ ! "$username" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+        error_exit "Invalid username. Use only lowercase letters, numbers, hyphens, and underscores. Must start with a letter"
     fi
     
     # Check against system usernames
