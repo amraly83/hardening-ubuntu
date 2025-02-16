@@ -1,24 +1,21 @@
 #!/bin/bash
-set -euo pipefail
 
-# Check if run as root
-if [[ $EUID -ne 0 ]]; then
-    echo "This script must be run as root"
-    exit 1
-fi
+# Source common functions
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+# Initialize script
+LOG_FILE="/var/log/server-hardening.log"
+init_script
 
 # Get username
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
     read -p "Enter username to setup SSH key for: " USERNAME
 else
     USERNAME="$1"
 fi
 
 # Check if user exists
-if ! id "$USERNAME" >/dev/null 2>&1; then
-    echo "User $USERNAME does not exist"
-    exit 1
-fi
+check_user_exists "$USERNAME"
 
 # Create .ssh directory if it doesn't exist
 SSH_DIR="/home/${USERNAME}/.ssh"
@@ -31,21 +28,24 @@ fi
 # Path for the authorized_keys file
 AUTH_KEYS="${SSH_DIR}/authorized_keys"
 
-# Function to validate SSH public key
-validate_ssh_key() {
-    local key="$1"
-    ssh-keygen -l -f <(echo "$key") >/dev/null 2>&1
-}
+# Check if authorized_keys already exists
+if [[ -f "$AUTH_KEYS" ]]; then
+    backup_file "$AUTH_KEYS"
+fi
 
 # Get the SSH public key
 while true; do
     echo "Please paste the SSH public key (starts with ssh-rsa or ssh-ed25519):"
     read -r PUBKEY
     
+    if [[ -z "$PUBKEY" ]]; then
+        error_exit "No SSH key provided"
+    fi
+    
     if validate_ssh_key "$PUBKEY"; then
         break
     else
-        echo "Invalid SSH public key. Please try again."
+        log "ERROR" "Invalid SSH public key. Please try again."
     fi
 done
 
@@ -54,5 +54,21 @@ echo "$PUBKEY" >> "$AUTH_KEYS"
 chown "${USERNAME}:${USERNAME}" "$AUTH_KEYS"
 chmod 600 "$AUTH_KEYS"
 
-echo "SSH key has been added for user ${USERNAME}"
-echo "Please verify SSH key access before running the hardening script!"
+# Verify SSH access works
+log "INFO" "Verifying SSH key setup..."
+if ! verify_ssh_access "$USERNAME"; then
+    log "WARNING" "Could not verify SSH access automatically"
+    echo "Please test SSH access manually"
+fi
+
+log "INFO" "SSH key has been added for user ${USERNAME}"
+echo "================================================================"
+echo "SSH key setup complete for ${USERNAME}"
+echo
+echo "To test the SSH key access:"
+echo "1. Try logging in from another terminal:"
+echo "   ssh -i ~/.ssh/id_ed25519 ${USERNAME}@hostname"
+echo
+echo "2. If using 2FA, set it up now:"
+echo "   ./setup-2fa.sh ${USERNAME}"
+echo "================================================================"

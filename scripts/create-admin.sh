@@ -1,37 +1,47 @@
 #!/bin/bash
-set -euo pipefail
 
-if [[ $EUID -ne 0 ]]; then
-    echo "This script must be run as root"
-    exit 1
-fi
+# Source common functions
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Get username
-if [ -z "$1" ]; then
+# Initialize script
+LOG_FILE="/var/log/server-hardening.log"
+init_script
+
+# Main script logic starts here
+if [ -z "${1:-}" ]; then
     read -p "Enter new admin username: " USERNAME
 else
     USERNAME="$1"
 fi
 
 # Validate username
-if [[ ! "$USERNAME" =~ ^[a-z][-a-z0-9]*$ ]]; then
-    echo "Invalid username. Use only lowercase letters, numbers, and hyphens."
-    echo "Username must start with a letter."
-    exit 1
-fi
+validate_username "$USERNAME"
 
 # Check if user exists
 if id "$USERNAME" >/dev/null 2>&1; then
-    echo "User $USERNAME already exists"
-    exit 1
+    if is_user_admin "$USERNAME"; then
+        error_exit "User '$USERNAME' already exists and is already an admin user"
+    else
+        log "WARNING" "User '$USERNAME' already exists but is not an admin"
+        if prompt_yes_no "Would you like to add this user to sudo group" "no"; then
+            usermod -aG sudo "$USERNAME"
+            log "INFO" "Added '$USERNAME' to sudo group"
+        else
+            error_exit "Operation cancelled by user"
+        fi
+    fi
+else
+    # Create new user
+    log "INFO" "Creating new admin user: $USERNAME"
+    if ! adduser --gecos "" "$USERNAME"; then
+        error_exit "Failed to create user '$USERNAME'"
+    fi
+    
+    # Add to sudo group
+    if ! usermod -aG sudo "$USERNAME"; then
+        error_exit "Failed to add '$USERNAME' to sudo group"
+    fi
 fi
-
-# Create user
-echo "Creating new admin user: $USERNAME"
-adduser "$USERNAME"
-
-# Add to sudo group
-usermod -aG sudo "$USERNAME"
 
 # Set up .ssh directory
 SSH_DIR="/home/${USERNAME}/.ssh"
@@ -41,15 +51,11 @@ if [[ ! -d "$SSH_DIR" ]]; then
     chmod 700 "$SSH_DIR"
 fi
 
-# Path for the authorized_keys file
-AUTH_KEYS="${SSH_DIR}/authorized_keys"
-touch "$AUTH_KEYS"
-chown "${USERNAME}:${USERNAME}" "$AUTH_KEYS"
-chmod 600 "$AUTH_KEYS"
-
+log "INFO" "Successfully configured admin user: $USERNAME"
 echo "================================================================"
-echo "Admin user $USERNAME has been created and added to sudo group"
-echo "Before running the hardening script, you MUST:"
+echo "Admin user $USERNAME has been configured"
+echo
+echo "Next steps:"
 echo "1. Set up SSH keys for this user:"
 echo "   ./setup-ssh-key.sh $USERNAME"
 echo
