@@ -1,10 +1,14 @@
 #!/bin/bash
+# Get the absolute path of the script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Source common functions
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-
-# Initialize script
+# Set log file first (before sourcing common.sh)
 LOG_FILE="/var/log/server-hardening.log"
+
+# Source common functions using absolute path
+source "${SCRIPT_DIR}/common.sh"
+
+# Initialize script (this needs to be after sourcing common.sh)
 init_script
 
 # Get username with retry logic

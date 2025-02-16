@@ -1,9 +1,13 @@
 #!/bin/bash
+# Fix permissions and line endings
+find "$(dirname "${BASH_SOURCE[0]}")" -name "*.sh" -type f -exec chmod +x {} \; -exec sed -i 's/\r$//' {} +
+
 # Set log file first
 LOG_FILE="/var/log/server-setup.log"
 
-# Source common functions
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# Source common functions - using full path resolution
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
 # Initialize script after sourcing
 init_script
