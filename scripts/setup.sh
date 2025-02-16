@@ -240,22 +240,77 @@ confirm_continue() {
 # Function to verify step completion with progress tracking
 verify_step() {
     local step="$1"
-    local check_command="$2"
+    local username="$2"
     
     log "INFO" "Verifying step: $step"
     track_progress "$step" "verifying"
     
-    if ! eval "$check_command"; then
-        log "ERROR" "Verification failed for: $step"
-        track_progress "$step" "failed"
-        if ! prompt_yes_no "Retry this step?" "yes"; then
-            error_exit "Setup failed at: $step"
-        fi
-        return 1
-    fi
+    case "$step" in
+        "Admin user setup")
+            if ! verify_admin_setup "$username"; then
+                log "ERROR" "Verification failed for: $step"
+                track_progress "$step" "failed"
+                return 1
+            fi
+            ;;
+        "SSH key setup")
+            if ! check_ssh_key_setup "$username"; then
+                log "ERROR" "Verification failed for: $step"
+                track_progress "$step" "failed"
+                return 1
+            fi
+            ;;
+        "2FA setup")
+            if ! test_2fa "$username"; then
+                log "ERROR" "Verification failed for: $step"
+                track_progress "$step" "failed"
+                return 1
+            fi
+            ;;
+        "System hardening")
+            if ! verify_hardening; then
+                log "ERROR" "Verification failed for: $step"
+                track_progress "$step" "failed"
+                return 1
+            fi
+            ;;
+        *)
+            log "ERROR" "Unknown verification step: $step"
+            track_progress "$step" "failed"
+            return 1
+            ;;
+    esac
     
     log "SUCCESS" "Verified successfully: $step"
     track_progress "$step" "verified"
+    return 0
+}
+
+# Function to safely verify sudo access
+verify_admin_setup() {
+    local username="$1"
+    # Clean the username to prevent command injection
+    username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    
+    # First verify user exists
+    if ! id "$username" >/dev/null 2>&1; then
+        log "ERROR" "User $username does not exist"
+        return 1
+    fi
+    
+    # Verify sudo group membership
+    if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+        log "ERROR" "User $username is not in the sudo group"
+        return 1
+    fi
+    
+    # Verify sudo access
+    if ! su - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+        log "ERROR" "Failed to verify sudo access for $username"
+        return 1
+    fi
+    
+    log "SUCCESS" "Admin setup verified for $username"
     return 0
 }
 
@@ -287,21 +342,21 @@ main() {
     local USERNAME=""
     while [[ -z "$USERNAME" ]]; do
         USERNAME=$(setup_admin_user)
-        USERNAME=$(echo "$USERNAME" | tr -d '\n')
+        USERNAME=$(echo "$USERNAME" | tr -cd 'a-z0-9_-')
         if [[ -z "$USERNAME" ]]; then
             log "ERROR" "Failed to get valid username, retrying..."
             sleep 1
         fi
     done
     
-    verify_step "Admin user setup" "verify_sudo_access '$USERNAME'" || {
+    verify_step "Admin user setup" "$USERNAME" || {
         error_exit "Failed to verify admin user setup"
     }
     confirm_continue "Admin user setup"
     
     # Setup SSH keys with verification
     setup_ssh_keys "$USERNAME"
-    verify_step "SSH key setup" "check_ssh_key_setup '$USERNAME'" || {
+    verify_step "SSH key setup" "$USERNAME" || {
         error_exit "Failed to verify SSH key setup"
     }
     confirm_continue "SSH key setup"
@@ -309,7 +364,7 @@ main() {
     # Setup 2FA if requested
     if prompt_yes_no "Would you like to set up 2FA?" "yes"; then
         setup_2fa "$USERNAME"
-        verify_step "2FA setup" "test_2fa '$USERNAME'" || {
+        verify_step "2FA setup" "$USERNAME" || {
             error_exit "Failed to verify 2FA setup"
         }
         confirm_continue "2FA setup"
@@ -318,7 +373,7 @@ main() {
     # Run system hardening with verification
     if prompt_yes_no "Proceed with system hardening?" "yes"; then
         run_hardening
-        verify_step "System hardening" "verify_hardening" || {
+        verify_step "System hardening" "$USERNAME" || {
             error_exit "Failed to verify system hardening"
         }
         confirm_continue "System hardening"

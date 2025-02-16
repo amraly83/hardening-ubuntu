@@ -222,39 +222,86 @@ prompt_yes_no() {
 # Verification
 verify_sudo_access() {
     local username="$1"
-    local max_retries=2
+    local max_retries=3
     local retry=0
-    local delay=1
+    local delay=2
     
     log "INFO" "Starting sudo access verification for $username..."
     
+    # Clean the username to prevent command injection
+    username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    
+    # First verify user exists
     if ! id "$username" >/dev/null 2>&1; then
         log "ERROR" "User $username does not exist"
         return 1
     fi
     
-    if [[ $EUID -eq 0 ]]; then
-        if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
-            log "ERROR" "User $username is not in the sudo group"
-            return 1
-        fi
-        
-        if ! su - "$username" -c "sudo -n true" 2>/dev/null; then
-            log "ERROR" "Failed to verify sudo access for $username"
-            return 1
-        fi
-        
-        log "SUCCESS" "Sudo access verified for $username"
-        return 0
-    else
-        if sudo -n true 2>/dev/null; then
-            log "SUCCESS" "Sudo access verified for current user"
-            return 0
-        fi
-        
-        log "ERROR" "Cannot verify sudo access without root privileges"
+    # Ensure sudo group membership
+    if ! ensure_sudo_membership "$username"; then
+        log "ERROR" "Failed to ensure sudo group membership"
         return 1
     fi
+    
+    # Verify sudo group membership and collect debug info
+    local groups_output
+    groups_output=$(groups "$username" 2>&1)
+    log "DEBUG" "Group membership for $username: $groups_output"
+    
+    if ! echo "$groups_output" | grep -qE '\b(sudo|admin|wheel)\b'; then
+        log "ERROR" "User $username is not in the sudo group (groups: $groups_output)"
+        return 1
+    fi
+    
+    # Check sudo configuration
+    if [[ -f "/etc/sudoers.d/$username" ]]; then
+        log "DEBUG" "Found sudoers file for $username"
+        local sudoers_perms
+        sudoers_perms=$(stat -c "%a %U:%G" "/etc/sudoers.d/$username" 2>&1)
+        log "DEBUG" "Sudoers file permissions: $sudoers_perms"
+    fi
+    
+    # Try sudo access with retries and verbose logging
+    while [[ $retry -lt $max_retries ]]; do
+        log "DEBUG" "Attempting sudo verification (attempt $((retry + 1))/$max_retries)"
+        
+        if [[ $EUID -eq 0 ]]; then
+            # Try as root using su
+            if su - "$username" -c "sudo -nv" >/dev/null 2>&1; then
+                log "SUCCESS" "Sudo access verified for $username"
+                return 0
+            else
+                local sudo_error=$?
+                log "DEBUG" "sudo verification failed with exit code: $sudo_error"
+            fi
+        else
+            # Try direct sudo if we're the user
+            if [[ "$USER" == "$username" ]] && sudo -nv >/dev/null 2>&1; then
+                log "SUCCESS" "Sudo access verified for current user"
+                return 0
+            fi
+        fi
+        
+        log "WARNING" "Sudo verification attempt $((retry + 1)) failed, waiting ${delay}s..."
+        sleep $delay
+        ((retry++))
+        delay=$((delay * 2))
+        
+        # Check sudo timestamp
+        if [[ -d "/var/run/sudo/$username" ]]; then
+            log "DEBUG" "Found sudo timestamp directory for $username"
+        fi
+    done
+    
+    # Final attempt with more verbose error collection
+    if [[ $EUID -eq 0 ]]; then
+        local verbose_output
+        verbose_output=$(su - "$username" -c "sudo -v" 2>&1)
+        log "DEBUG" "Final sudo verification attempt output: $verbose_output"
+    fi
+    
+    log "ERROR" "Failed to verify sudo access for $username after $max_retries attempts"
+    return 1
 }
 
 verify_ssh_access() {
@@ -330,6 +377,48 @@ verify_all_configurations() {
     fi
     
     [[ "$all_passed" == "true" ]]
+}
+
+# Add new function for sudo group handling
+ensure_sudo_membership() {
+    local username="$1"
+    local max_attempts=3
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        log "DEBUG" "Checking sudo membership (attempt $attempt/$max_attempts)"
+        
+        # Check current groups
+        if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+            log "SUCCESS" "User $username is in sudo group"
+            return 0
+        fi
+        
+        log "WARNING" "User $username not in sudo group, attempting to add..."
+        
+        # Try to add to sudo group
+        if usermod -aG sudo "$username"; then
+            log "INFO" "Added $username to sudo group"
+            
+            # Force group update
+            if pkill -SIGHUP -u "$username" >/dev/null 2>&1; then
+                log "DEBUG" "Sent SIGHUP to user processes"
+            fi
+            
+            # Verify group membership again
+            if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+                log "SUCCESS" "Verified sudo group membership"
+                return 0
+            fi
+        fi
+        
+        log "WARNING" "Sudo group modification attempt $attempt failed"
+        sleep 2
+        ((attempt++))
+    done
+    
+    log "ERROR" "Failed to ensure sudo membership after $max_attempts attempts"
+    return 1
 }
 
 # Script initialization
