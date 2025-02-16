@@ -10,29 +10,20 @@ init_script
 # Clean input from any ANSI codes and log prefixes
 clean_input() {
     local input="$1"
-    
-    # First try to extract username from log format
-    if [[ "$input" =~ Using\ existing\ admin\ user:\ ([a-zA-Z0-9_-]+) ]]; then
-        cleaned="${BASH_REMATCH[1]}"
-        log "DEBUG" "Extracted username from log format: $cleaned"
-        echo "$cleaned"
-        return
-    fi
-    
-    # Fallback to general cleaning if no username found
+
     # Remove all ANSI escape sequences including colors, cursor movements, etc.
     cleaned=$(echo "$input" | sed -r 's/\x1B\[([0-9]{1,2}(;[0-9]{1,2})*)?[mGK]//g')
-    
+
     # Remove log prefixes with more robust pattern matching
     cleaned=$(echo "$cleaned" | sed -r 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //')
-    
+
     # Remove any remaining non-alphanumeric characters from start/end
     cleaned=$(echo "$cleaned" | sed -r 's/^[^a-zA-Z0-9_]*//;s/[^a-zA-Z0-9_]*$//')
-    
+
     # Debug logging
     log "DEBUG" "Original input: $input"
     log "DEBUG" "Cleaned input: $cleaned"
-    
+
     echo "$cleaned"
 }
 
