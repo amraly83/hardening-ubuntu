@@ -237,70 +237,92 @@ verify_sudo_access() {
         return 1
     fi
     
-    # Ensure sudo group membership
+    # Ensure sudo group membership first
     if ! ensure_sudo_membership "$username"; then
         log "ERROR" "Failed to ensure sudo group membership"
         return 1
     fi
     
-    # Verify sudo group membership and collect debug info
-    local groups_output
-    groups_output=$(groups "$username" 2>&1)
-    log "DEBUG" "Group membership for $username: $groups_output"
+    # Reset sudo timestamp to force new authentication
+    if [[ $EUID -eq 0 ]]; then
+        log "DEBUG" "Resetting sudo timestamp for $username"
+        sudo -K -u "$username" 2>/dev/null || true
+    fi
     
-    if ! echo "$groups_output" | grep -qE '\b(sudo|admin|wheel)\b'; then
-        log "ERROR" "User $username is not in the sudo group (groups: $groups_output)"
+    # Function to test sudo access
+    test_sudo_access() {
+        local test_user="$1"
+        local test_cmd="$2"
+        
+        # Try sudo with specified command
+        if su - "$test_user" -c "$test_cmd" >/dev/null 2>&1; then
+            return 0
+        fi
         return 1
-    fi
+    }
     
-    # Check sudo configuration
-    if [[ -f "/etc/sudoers.d/$username" ]]; then
-        log "DEBUG" "Found sudoers file for $username"
-        local sudoers_perms
-        sudoers_perms=$(stat -c "%a %U:%G" "/etc/sudoers.d/$username" 2>&1)
-        log "DEBUG" "Sudoers file permissions: $sudoers_perms"
-    fi
+    # Try different sudo test commands
+    local sudo_tests=(
+        "sudo -nv"                    # Non-interactive validate
+        "sudo -n true"               # Non-interactive simple command
+        "sudo -n id"                 # Non-interactive id command
+        "sudo -n /bin/true"          # Non-interactive full path command
+    )
     
-    # Try sudo access with retries and verbose logging
-    while [[ $retry -lt $max_retries ]]; do
-        log "DEBUG" "Attempting sudo verification (attempt $((retry + 1))/$max_retries)"
-        
-        if [[ $EUID -eq 0 ]]; then
-            # Try as root using su
-            if su - "$username" -c "sudo -nv" >/dev/null 2>&1; then
-                log "SUCCESS" "Sudo access verified for $username"
-                return 0
-            else
-                local sudo_error=$?
-                log "DEBUG" "sudo verification failed with exit code: $sudo_error"
-            fi
-        else
-            # Try direct sudo if we're the user
-            if [[ "$USER" == "$username" ]] && sudo -nv >/dev/null 2>&1; then
-                log "SUCCESS" "Sudo access verified for current user"
+    # Try each test with retries
+    for test_cmd in "${sudo_tests[@]}"; do
+        retry=0
+        while [[ $retry -lt $max_retries ]]; do
+            log "DEBUG" "Attempting sudo verification with '$test_cmd' (attempt $((retry + 1))/$max_retries)"
+            
+            if test_sudo_access "$username" "$test_cmd"; then
+                log "SUCCESS" "Sudo access verified for $username using: $test_cmd"
                 return 0
             fi
-        fi
-        
-        log "WARNING" "Sudo verification attempt $((retry + 1)) failed, waiting ${delay}s..."
-        sleep $delay
-        ((retry++))
-        delay=$((delay * 2))
-        
-        # Check sudo timestamp
-        if [[ -d "/var/run/sudo/$username" ]]; then
-            log "DEBUG" "Found sudo timestamp directory for $username"
-        fi
+            
+            log "DEBUG" "Sudo test failed, waiting ${delay}s before retry..."
+            sleep $delay
+            ((retry++))
+            delay=$((delay * 2))
+            
+            # Try refreshing group membership
+            if [[ $retry -eq 1 ]]; then
+                log "DEBUG" "Refreshing group membership for $username"
+                pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+                sleep 1
+            fi
+        done
     done
     
-    # Final attempt with more verbose error collection
+    # If all tests failed, try to collect diagnostic information
+    log "DEBUG" "Collecting sudo diagnostic information..."
+    
+    # Check sudoers entries
     if [[ $EUID -eq 0 ]]; then
-        local verbose_output
-        verbose_output=$(su - "$username" -c "sudo -v" 2>&1)
-        log "DEBUG" "Final sudo verification attempt output: $verbose_output"
+        local sudoers_output
+        sudoers_output=$(grep -r "$username" /etc/sudoers.d/ 2>/dev/null || true)
+        if [[ -n "$sudoers_output" ]]; then
+            log "DEBUG" "Found sudoers entries: $sudoers_output"
+        fi
+        
+        # Check sudo group membership again
+        local groups_output
+        groups_output=$(groups "$username" 2>&1)
+        log "DEBUG" "Final group membership: $groups_output"
+        
+        # Try to fix permissions if needed
+        log "DEBUG" "Fixing home directory permissions..."
+        chown -R "$username:$username" "/home/$username" 2>/dev/null || true
+        chmod 750 "/home/$username" 2>/dev/null || true
+        
+        # One final attempt with standard sudo
+        if su - "$username" -c "sudo -v" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified after fixes"
+            return 0
+        fi
     fi
     
-    log "ERROR" "Failed to verify sudo access for $username after $max_retries attempts"
+    log "ERROR" "Failed to verify sudo access for $username after exhausting all options"
     return 1
 }
 
