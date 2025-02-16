@@ -65,8 +65,15 @@ setup_admin_user() {
     while [[ $attempt -le $max_attempts ]]; do
         read -p "Enter username for the new admin user: " NEW_ADMIN_USER
         
-        # Clean any color codes and special characters from input
-        NEW_ADMIN_USER=$(echo "$NEW_ADMIN_USER" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -cd 'a-z0-9-')
+        # Remove ANSI escape sequences and whitespace, preserve valid username chars
+        NEW_ADMIN_USER=$(echo "$NEW_ADMIN_USER" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -d '\n' | tr -cd 'a-z0-9-_' | sed 's/^[^a-z]//')
+        
+        # Check if username is empty after cleaning
+        if [[ -z "$NEW_ADMIN_USER" ]]; then
+            log "ERROR" "Username cannot be empty"
+            ((attempt++))
+            continue
+        fi
         
         # First validate the username format
         if ! validate_username "$NEW_ADMIN_USER" 2>/dev/null; then
