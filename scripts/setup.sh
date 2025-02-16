@@ -97,7 +97,19 @@ setup_admin_user() {
             if is_user_admin "$NEW_ADMIN_USER"; then
                 log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin" >&2
                 if prompt_yes_no "Would you like to use this existing admin user" "yes" >&2; then
-                    # Output just the username to stdout, everything else to stderr
+                    # Initialize sudo before returning
+                    if [[ $EUID -eq 0 ]]; then
+                        log "DEBUG" "Pre-initializing sudo access..." >&2
+                        # Reset sudo timestamp
+                        sudo -K -u "$NEW_ADMIN_USER" 2>/dev/null || true
+                        # Ensure sudo group
+                        usermod -aG sudo "$NEW_ADMIN_USER" 2>/dev/null || true
+                        # Create sudoers entry
+                        echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
+                        chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
+                        # Wait for changes to take effect
+                        sleep 2
+                    fi
                     printf "%s" "$NEW_ADMIN_USER"
                     return 0
                 fi
@@ -106,6 +118,13 @@ setup_admin_user() {
                 if prompt_yes_no "Would you like to grant admin privileges to this user" "no" >&2; then
                     log "INFO" "Adding '$NEW_ADMIN_USER' to sudo group" >&2
                     if usermod -aG sudo "$NEW_ADMIN_USER"; then
+                        # Initialize sudo access
+                        if [[ $EUID -eq 0 ]]; then
+                            log "DEBUG" "Pre-initializing sudo access..." >&2
+                            echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
+                            chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
+                            sleep 2
+                        fi
                         # Verify sudo access after adding to group
                         if verify_sudo_access "$NEW_ADMIN_USER"; then
                             log "INFO" "Sudo access granted and verified" >&2
@@ -137,6 +156,18 @@ setup_admin_user() {
                 fi
                 ((attempt++))
                 continue
+            fi
+            
+            # Pre-initialize sudo access for new user
+            if [[ $EUID -eq 0 ]]; then
+                log "DEBUG" "Pre-initializing sudo access for new user..." >&2
+                # Ensure sudo group membership
+                usermod -aG sudo "$NEW_ADMIN_USER"
+                # Create sudoers entry
+                echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
+                chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
+                # Wait for changes to take effect
+                sleep 2
             fi
             
             # Verify sudo access for new user
@@ -286,11 +317,13 @@ verify_step() {
     return 0
 }
 
-# Function to safely verify sudo access
+# Function to safely verify sudo access with auto-repair
 verify_admin_setup() {
     local username="$1"
     # Clean the username to prevent command injection
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    
+    log "INFO" "Starting admin verification for $username"
     
     # First verify user exists
     if ! id "$username" >/dev/null 2>&1; then
@@ -298,20 +331,80 @@ verify_admin_setup() {
         return 1
     fi
     
-    # Verify sudo group membership
-    if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
-        log "ERROR" "User $username is not in the sudo group"
-        return 1
+    # Check current sudo group membership
+    local group_check
+    group_check=$(groups "$username" 2>&1)
+    log "DEBUG" "Current groups: $group_check"
+    
+    # Initialize sudo config
+    if [[ $EUID -eq 0 ]]; then
+        log "DEBUG" "Initializing sudo configuration..."
+        
+        # Ensure sudoers.d exists and has correct permissions
+        if [[ ! -d "/etc/sudoers.d" ]]; then
+            mkdir -p "/etc/sudoers.d"
+            chmod 750 "/etc/sudoers.d"
+        fi
+        
+        # Create or update sudoers file
+        local sudoers_file="/etc/sudoers.d/$username"
+        echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+        chmod 440 "$sudoers_file"
+        
+        # Validate sudoers syntax
+        if ! visudo -c -f "$sudoers_file" >/dev/null 2>&1; then
+            log "ERROR" "Invalid sudoers entry for $username"
+            rm -f "$sudoers_file"
+            return 1
+        fi
+        
+        # Reset sudo timestamp
+        log "DEBUG" "Resetting sudo timestamp for $username"
+        sudo -K -u "$username" 2>/dev/null || true
+        sleep 1
+        
+        # Re-add to sudo group to refresh membership
+        log "DEBUG" "Refreshing sudo group membership"
+        usermod -aG sudo "$username"
+        pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+        sleep 2
+        
+        # Force group update by starting new session
+        log "DEBUG" "Testing sudo access with new session"
+        if su - "$username" -c "sudo -v" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo initialization successful"
+        else
+            log "WARNING" "Initial sudo test failed, attempting fixes..."
+            
+            # Try direct sudo command
+            if su - "$username" -c "sudo true" >/dev/null 2>&1; then
+                log "SUCCESS" "Direct sudo command successful"
+            else
+                # Check PAM configuration
+                if ! grep -q "auth.*pam_wheel.so" /etc/pam.d/sudo 2>/dev/null; then
+                    log "DEBUG" "Adding wheel group to PAM configuration"
+                    echo "auth required pam_wheel.so use_uid" >> /etc/pam.d/sudo
+                fi
+                
+                # One final attempt after PAM fix
+                if ! su - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+                    log "ERROR" "Failed to initialize sudo access after fixes"
+                    return 1
+                fi
+            fi
+        fi
     fi
     
-    # Verify sudo access
-    if ! su - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-        log "ERROR" "Failed to verify sudo access for $username"
+    # Final verification with diagnostic output
+    local sudo_test_output
+    sudo_test_output=$(su - "$username" -c "sudo -n true" 2>&1)
+    if [[ $? -eq 0 ]]; then
+        log "SUCCESS" "Admin setup verified for $username"
+        return 0
+    else
+        log "ERROR" "Final sudo test failed with output: $sudo_test_output"
         return 1
     fi
-    
-    log "SUCCESS" "Admin setup verified for $username"
-    return 0
 }
 
 # Main setup process with progress tracking
