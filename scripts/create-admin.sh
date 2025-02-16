@@ -19,6 +19,31 @@ source "$COMMON_SH" || { echo "Error: Failed to source $COMMON_SH"; exit 1; }
 # Initialize script (after sourcing common.sh)
 init_script || { echo "Error: Failed to initialize script"; exit 1; }
 
+# Function to initialize sudo access
+initialize_sudo_access() {
+    local username="$1"
+    log "INFO" "Initializing sudo access for $username"
+    
+    # Create sudoers.d entry
+    local sudoers_file="/etc/sudoers.d/$username"
+    if [[ ! -f "$sudoers_file" ]]; then
+        echo "$username ALL=(ALL) NOPASSWD: /usr/bin/sudo" > "$sudoers_file"
+        chmod 440 "$sudoers_file"
+    fi
+    
+    # Add to sudo group
+    usermod -aG sudo "$username"
+    
+    # Force group update
+    pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+    
+    # Wait for group membership to propagate
+    sleep 2
+    
+    # Initialize sudo timestamp
+    su - "$username" -c "sudo -v" >/dev/null 2>&1 || true
+}
+
 # Get username with retry logic
 get_valid_username() {
     local username
@@ -128,6 +153,9 @@ main() {
     if ! usermod -aG sudo "$USERNAME"; then
         error_exit "Failed to add '$USERNAME' to sudo group"
     fi
+    
+    # Initialize sudo access
+    initialize_sudo_access "$USERNAME"
     
     # Set up .ssh directory
     SSH_DIR="/home/${USERNAME}/.ssh"

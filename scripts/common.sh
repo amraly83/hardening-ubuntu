@@ -243,30 +243,46 @@ verify_sudo_access() {
         return 1
     fi
     
-    # Reset sudo timestamp to force new authentication
+    # Initialize sudo for first use - this is important!
     if [[ $EUID -eq 0 ]]; then
-        log "DEBUG" "Resetting sudo timestamp for $username"
+        log "DEBUG" "Initializing sudo access for $username"
+        # Create sudoers.d file if it doesn't exist
+        if [[ ! -f "/etc/sudoers.d/$username" ]]; then
+            echo "$username ALL=(ALL) ALL" > "/etc/sudoers.d/$username"
+            chmod 440 "/etc/sudoers.d/$username"
+            log "DEBUG" "Created sudoers entry for $username"
+        fi
+        
+        # Reset sudo timestamp and touch it to initialize
+        log "DEBUG" "Resetting and initializing sudo timestamp"
         sudo -K -u "$username" 2>/dev/null || true
+        if ! su - "$username" -c "sudo -v" >/dev/null 2>&1; then
+            log "DEBUG" "Initial sudo validation failed, retrying with timestamp reset"
+        fi
     fi
     
-    # Function to test sudo access
+    # Function to test sudo access with debugging
     test_sudo_access() {
         local test_user="$1"
         local test_cmd="$2"
+        local debug_output
         
-        # Try sudo with specified command
-        if su - "$test_user" -c "$test_cmd" >/dev/null 2>&1; then
+        log "DEBUG" "Testing sudo access with command: $test_cmd"
+        if debug_output=$(su - "$test_user" -c "$test_cmd" 2>&1); then
+            log "DEBUG" "Sudo test successful"
             return 0
+        else
+            log "DEBUG" "Sudo test failed with output: $debug_output"
+            return 1
         fi
-        return 1
     }
     
-    # Try different sudo test commands
+    # Try different sudo test commands with full error reporting
     local sudo_tests=(
-        "sudo -nv"                    # Non-interactive validate
-        "sudo -n true"               # Non-interactive simple command
-        "sudo -n id"                 # Non-interactive id command
-        "sudo -n /bin/true"          # Non-interactive full path command
+        "sudo -nv"              # Non-interactive validate
+        "sudo -n true"          # Non-interactive simple command
+        "sudo -n id"            # Non-interactive id command
+        "sudo -n /bin/true"     # Non-interactive full path command
     )
     
     # Try each test with retries
@@ -280,42 +296,58 @@ verify_sudo_access() {
                 return 0
             fi
             
+            # After first failure, try to fix common issues
+            if [[ $retry -eq 0 ]]; then
+                log "DEBUG" "First attempt failed, trying fixes..."
+                
+                # Refresh group membership
+                log "DEBUG" "Refreshing group membership"
+                pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+                sleep 1
+                
+                # Fix permissions
+                if [[ $EUID -eq 0 ]]; then
+                    log "DEBUG" "Fixing home directory permissions"
+                    chown -R "$username:$username" "/home/$username" 2>/dev/null || true
+                    chmod 750 "/home/$username" 2>/dev/null || true
+                    
+                    # Verify sudoers entry
+                    log "DEBUG" "Verifying sudoers configuration"
+                    if [[ -f "/etc/sudoers.d/$username" ]]; then
+                        chmod 440 "/etc/sudoers.d/$username"
+                    fi
+                fi
+            fi
+            
             log "DEBUG" "Sudo test failed, waiting ${delay}s before retry..."
             sleep $delay
             ((retry++))
             delay=$((delay * 2))
-            
-            # Try refreshing group membership
-            if [[ $retry -eq 1 ]]; then
-                log "DEBUG" "Refreshing group membership for $username"
-                pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
-                sleep 1
-            fi
         done
     done
     
     # If all tests failed, try to collect diagnostic information
     log "DEBUG" "Collecting sudo diagnostic information..."
     
-    # Check sudoers entries
     if [[ $EUID -eq 0 ]]; then
+        # Check sudoers configuration
         local sudoers_output
         sudoers_output=$(grep -r "$username" /etc/sudoers.d/ 2>/dev/null || true)
-        if [[ -n "$sudoers_output" ]]; then
-            log "DEBUG" "Found sudoers entries: $sudoers_output"
-        fi
+        log "DEBUG" "Sudoers entries: ${sudoers_output:-none found}"
         
-        # Check sudo group membership again
+        # Check group membership
         local groups_output
         groups_output=$(groups "$username" 2>&1)
-        log "DEBUG" "Final group membership: $groups_output"
+        log "DEBUG" "Group membership: $groups_output"
         
-        # Try to fix permissions if needed
-        log "DEBUG" "Fixing home directory permissions..."
-        chown -R "$username:$username" "/home/$username" 2>/dev/null || true
-        chmod 750 "/home/$username" 2>/dev/null || true
+        # Check sudo configuration
+        if visudo -c >/dev/null 2>&1; then
+            log "DEBUG" "Sudoers syntax is valid"
+        else
+            log "ERROR" "Sudoers syntax check failed"
+        fi
         
-        # One final attempt with standard sudo
+        # Try one last time with standard sudo after all fixes
         if su - "$username" -c "sudo -v" >/dev/null 2>&1; then
             log "SUCCESS" "Sudo access verified after fixes"
             return 0
