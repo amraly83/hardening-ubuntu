@@ -21,10 +21,35 @@
 ### 2. User Management Issues
 
 #### User Already Exists
-**Problem**: "User already exists and is already an admin user"
-**Solution**:
-- Use a different username
-- Or remove existing user first: `sudo deluser --remove-home username`
+**Problem**: "User already exists"
+**Solutions**:
+1. If user is already an admin:
+   - Choose "yes" to use the existing admin user
+   - The script will verify their configuration
+   - SSH keys and 2FA can be reconfigured if needed
+
+2. If user exists but is not an admin:
+   - Choose "yes" to grant admin privileges
+   - The user will be added to the sudo group
+   - Existing home directory and files will be preserved
+
+3. If you want a different user:
+   - Choose "no" when prompted
+   - Enter a different username
+   - You have 3 attempts before the script exits
+
+**Example Scenarios**:
+```
+Scenario 1: Existing admin user
+Q: "User 'admin' is already an admin. Would you like to use this existing admin user?"
+- Yes: Continues with existing user
+- No: Prompts for a different username
+
+Scenario 2: Existing regular user
+Q: "User 'user1' exists but is not an admin. Would you like to grant admin privileges?"
+- Yes: Adds user to sudo group
+- No: Prompts for a different username
+```
 
 #### Sudo Access Fails
 **Problem**: "Failed to verify sudo access"

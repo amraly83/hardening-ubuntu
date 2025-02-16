@@ -58,12 +58,62 @@ check_prerequisites() {
 
 setup_admin_user() {
     echo "=== Step 1: Admin User Setup ==="
-    read -p "Enter username for the new admin user: " NEW_ADMIN_USER
+    local NEW_ADMIN_USER
+    local max_attempts=3
+    local attempt=1
     
-    log "INFO" "Creating new admin user: $NEW_ADMIN_USER"
-    if ! "${SCRIPT_DIR}/create-admin.sh" "$NEW_ADMIN_USER"; then
-        error_exit "Failed to create admin user"
-    fi
+    while [[ $attempt -le $max_attempts ]]; do
+        read -p "Enter username for the new admin user: " NEW_ADMIN_USER
+        
+        # First validate the username format
+        if ! validate_username "$NEW_ADMIN_USER" 2>/dev/null; then
+            log "ERROR" "Invalid username format"
+            ((attempt++))
+            continue
+        fi
+        
+        # Check if user exists
+        if id "$NEW_ADMIN_USER" >/dev/null 2>&1; then
+            if is_user_admin "$NEW_ADMIN_USER"; then
+                log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin"
+                if prompt_yes_no "Would you like to use this existing admin user" "yes"; then
+                    break
+                else
+                    if [[ $attempt -eq $max_attempts ]]; then
+                        error_exit "Maximum attempts reached. Please start over with a different username"
+                    fi
+                    echo "Please enter a different username"
+                    ((attempt++))
+                    continue
+                fi
+            else
+                log "WARNING" "User '$NEW_ADMIN_USER' exists but is not an admin"
+                if prompt_yes_no "Would you like to grant admin privileges to this user" "no"; then
+                    log "INFO" "Adding '$NEW_ADMIN_USER' to sudo group"
+                    usermod -aG sudo "$NEW_ADMIN_USER" || error_exit "Failed to add user to sudo group"
+                    break
+                else
+                    if [[ $attempt -eq $max_attempts ]]; then
+                        error_exit "Maximum attempts reached. Please start over with a different username"
+                    fi
+                    echo "Please enter a different username"
+                    ((attempt++))
+                    continue
+                fi
+            fi
+        else
+            # Create new user
+            log "INFO" "Creating new admin user: $NEW_ADMIN_USER"
+            if ! "${SCRIPT_DIR}/create-admin.sh" "$NEW_ADMIN_USER"; then
+                if [[ $attempt -eq $max_attempts ]]; then
+                    error_exit "Failed to create admin user after $max_attempts attempts"
+                fi
+                ((attempt++))
+                continue
+            fi
+            break
+        fi
+    done
     
     # Verify sudo access
     if ! verify_sudo_access "$NEW_ADMIN_USER"; then
