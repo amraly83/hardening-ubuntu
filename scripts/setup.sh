@@ -9,6 +9,20 @@ LOG_FILE="/var/log/server-hardening.log"
 # Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Check for required commands including jq
+check_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Verify dependencies are installed
+if ! check_command jq; then
+    echo "Running dependency installation..."
+    if ! "${SCRIPT_DIR}/install-deps.sh"; then
+        echo "Error: Failed to install required dependencies"
+        exit 1
+    fi
+fi
+
 # Fix line endings in script-preloader first
 sed -i 's/\r$//' "${SCRIPT_DIR}/script-preloader.sh"
 chmod +x "${SCRIPT_DIR}/script-preloader.sh"

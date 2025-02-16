@@ -17,23 +17,6 @@ detect_os() {
     fi
 }
 
-# Function to install required tools
-install_required_tools() {
-    local os_type="$1"
-    case "$os_type" in
-        ubuntu|debian)
-            apt-get update
-            apt-get install -y file dos2unix jq
-            ;;
-        centos|rhel|fedora)
-            yum install -y file dos2unix jq
-            ;;
-        *)
-            echo "Warning: Unknown OS type. Please install 'file', 'dos2unix', and 'jq' manually."
-            ;;
-    esac
-}
-
 echo "Preparing deployment environment..."
 
 # Check if running as root on Linux
@@ -43,9 +26,12 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         exit 1
     fi
     
-    # Install required tools
-    OS_TYPE=$(detect_os)
-    install_required_tools "$OS_TYPE"
+    # Run install-deps.sh first to ensure all required tools are available
+    echo "Installing dependencies..."
+    if ! "${DEPLOY_DIR}/scripts/install-deps.sh"; then
+        echo "Error: Failed to install dependencies"
+        exit 1
+    fi
 fi
 
 # Create required directories

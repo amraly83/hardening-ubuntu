@@ -6,6 +6,22 @@ set -euo pipefail
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Function to ensure dependencies are installed
+ensure_dependencies() {
+    # Run install-deps.sh first if we don't have required commands
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Installing required dependencies..."
+        if ! "${SCRIPT_DIR}/install-deps.sh"; then
+            echo "Error: Failed to install dependencies"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Ensure dependencies before anything else
+ensure_dependencies || exit 1
+
 # Keep track of processed files
 declare -A PROCESSED_FILES
 
@@ -73,21 +89,61 @@ fix_script_formatting() {
     return 0
 }
 
-# Main script
-main() {
-    # Check required commands
+# Function to check and install jq
+ensure_jq_installed() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "jq is required but not installed. Attempting to install..."
+        if [[ $EUID -ne 0 ]]; then
+            echo "Error: This script needs root privileges to install jq"
+            echo "Please run 'sudo apt-get install -y jq' first"
+            return 1
+        fi
+        
+        # Try to detect package manager and install jq
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y jq
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y jq
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y jq
+        else
+            echo "Error: Could not determine package manager to install jq"
+            echo "Please install jq manually and try again"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Check required commands including jq
+check_required_commands() {
     local missing=()
-    local commands=("file" "tr" "sed" "grep" "bash")
+    local commands=("file" "tr" "sed" "grep" "bash" "jq")
     
     for cmd in "${commands[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing+=("$cmd")
+            if [[ "$cmd" == "jq" ]]; then
+                if ! ensure_jq_installed; then
+                    missing+=("$cmd")
+                fi
+            else
+                missing+=("$cmd")
+            fi
         fi
     done
     
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "Error: Missing required commands: ${missing[*]}"
         echo "Please install the missing packages and try again"
+        return 1
+    fi
+    return 0
+}
+
+# Main script
+main() {
+    # Check required commands
+    if ! check_required_commands; then
         exit 1
     fi
     
