@@ -9,11 +9,20 @@ init_script
 
 # Clean input from any ANSI codes and log prefixes
 clean_input() {
-    # Remove ANSI escape sequences using a more portable sed syntax
-    cleaned=$(echo "$1" | sed 's/\x1B\[[0-9;]*[mGK]//g')
+    local input="$1"
     
-    # Remove log prefixes using basic pattern matching
-    cleaned=$(echo "$cleaned" | sed 's/^\[[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\] \[\(DEBUG\|INFO\|WARNING\|ERROR\)\] //')
+    # Remove all ANSI escape sequences including colors, cursor movements, etc.
+    cleaned=$(echo "$input" | sed -r 's/\x1B\[([0-9]{1,2}(;[0-9]{1,2})*)?[mGK]//g')
+    
+    # Remove log prefixes with more robust pattern matching
+    cleaned=$(echo "$cleaned" | sed -r 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //')
+    
+    # Remove any remaining non-alphanumeric characters from start/end
+    cleaned=$(echo "$cleaned" | sed -r 's/^[^a-zA-Z0-9_]*//;s/[^a-zA-Z0-9_]*$//')
+    
+    # Debug logging
+    log "DEBUG" "Original input: $input"
+    log "DEBUG" "Cleaned input: $cleaned"
     
     echo "$cleaned"
 }
@@ -28,7 +37,7 @@ validate_username_input() {
 if [ -z "${1:-}" ]; then
     while true; do
         read -p "Enter username to setup SSH key for: " USERNAME
-        USERNAME=$(clean_input "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        USERNAME=$(clean_input "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
         if validate_username_input "$USERNAME"; then
             break
         else
@@ -36,7 +45,7 @@ if [ -z "${1:-}" ]; then
         fi
     done
 else
-    USERNAME=$(clean_input "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+    USERNAME=$(clean_input "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     if ! validate_username_input "$USERNAME"; then
         error_exit "Invalid username format: '$1' - must be lowercase, start with letter/underscore, 1-32 chars"
     fi
