@@ -7,15 +7,34 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 LOG_FILE="/var/log/server-hardening.log"
 init_script
 
-# Get username
+# Validate and get username
+validate_username_input() {
+    local username="$1"
+    [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && return 0 || return 1
+}
+
+# Get username with validation
 if [ -z "${1:-}" ]; then
-    read -p "Enter username to setup SSH key for: " USERNAME
+    while true; do
+        read -p "Enter username to setup SSH key for: " USERNAME
+        USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        if validate_username_input "$USERNAME"; then
+            break
+        else
+            log "ERROR" "Invalid username: $USERNAME. Must be lowercase, start with letter/underscore, 1-32 chars"
+        fi
+    done
 else
-    USERNAME="$1"
+    USERNAME=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+    if ! validate_username_input "$USERNAME"; then
+        error_exit "Invalid username format: '$1' - must be lowercase, start with letter/underscore, 1-32 chars"
+    fi
 fi
 
 # Check if user exists
-check_user_exists "$USERNAME"
+if ! check_user_exists "$USERNAME"; then
+    error_exit "User '$USERNAME' does not exist. Create the user first with './create-admin.sh'"
+fi
 
 # Create .ssh directory if it doesn't exist
 SSH_DIR="/home/${USERNAME}/.ssh"

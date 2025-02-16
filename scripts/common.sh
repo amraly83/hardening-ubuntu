@@ -19,26 +19,39 @@ log() {
     local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
     local color=""
     
+    # Validate log level
+    if [[ ! "${level^^}" =~ ^(ERROR|WARNING|INFO|DEBUG|SUCCESS)$ ]]; then
+        echo "[ERROR] Invalid log level: ${level}" >&2
+        return 1
+    fi
+    
+    # Clean message of any special characters
+    message=$(echo "$message" | tr -d '\000-\037')
+    
     # Set color based on log level
     case "${level^^}" in
         "ERROR") color="$COLOR_RED" ;;
         "WARNING") color="$COLOR_YELLOW" ;;
         "SUCCESS"|"INFO") color="$COLOR_GREEN" ;;
         "DEBUG") color="$COLOR_BLUE" ;;
-        *) color="$COLOR_RESET" ;;
     esac
     
     # Print to console with color
-    echo -e "${color}[${timestamp}] [${level}] ${message}${COLOR_RESET}"
+    echo -e "${color}[${timestamp}] [${level^^}] ${message}${COLOR_RESET}" | \
+        awk '{print substr($0, 1, 2000)}'  # Limit line length
     
     # If LOG_FILE is defined, log to file without color codes
     if [[ -n "${LOG_FILE:-}" ]]; then
-        echo "[${timestamp}] [${level}] ${message}" >> "$LOG_FILE"
+        echo "[${timestamp}] [${level^^}] ${message}" | \
+            awk '{print substr($0, 1, 2000)}' >> "$LOG_FILE"
     fi
 }
 
 error_exit() {
-    log "ERROR" "$1"
+    local message="$1"
+    # Ensure message is properly escaped
+    message=$(echo "$message" | sed 's/"/\\"/g')
+    log "ERROR" "$message"
     exit 1
 }
 
