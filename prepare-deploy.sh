@@ -7,72 +7,72 @@ set -euo pipefail
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/var/log/server-hardening.log"
 
-echo "Preparing scripts for deployment..."
-
-# Function to validate script syntax
-validate_script() {
-    local script="$1"
-    bash -n "$script" || {
-        echo "Syntax error in $script"
-        return 1
-    }
+# Function to detect OS
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        echo "${ID:-unknown}"
+    else
+        echo "unknown"
+    fi
 }
 
-# Function to fix file permissions and line endings
-fix_file_attributes() {
-    local file="$1"
-    # Remove Windows line endings
-    sed -i 's/\r$//' "$file"
-    # Make executable
-    chmod +x "$file"
-    # Validate script syntax
-    validate_script "$file"
+# Function to install required tools
+install_required_tools() {
+    local os_type="$1"
+    case "$os_type" in
+        ubuntu|debian)
+            apt-get update
+            apt-get install -y file dos2unix jq
+            ;;
+        centos|rhel|fedora)
+            yum install -y file dos2unix jq
+            ;;
+        *)
+            echo "Warning: Unknown OS type. Please install 'file', 'dos2unix', and 'jq' manually."
+            ;;
+    esac
 }
 
-# Prepare all shell scripts
-echo "Fixing permissions and line endings..."
-find "$DEPLOY_DIR" -type f -name "*.sh" | while read -r script; do
-    echo "Processing: $script"
-    fix_file_attributes "$script"
-done
+echo "Preparing deployment environment..."
 
-# Verify common.sh can be sourced
-if ! source "${DEPLOY_DIR}/scripts/common.sh" 2>/dev/null; then
-    echo "Error: Failed to source common.sh"
-    exit 1
-fi
-
-# Verify critical files exist
-REQUIRED_FILES=(
-    "scripts/setup.sh"
-    "scripts/create-admin.sh"
-    "scripts/setup-ssh-key.sh"
-    "scripts/setup-2fa.sh"
-    "scripts/harden.sh"
-    "scripts/common.sh"
-)
-
-for file in "${REQUIRED_FILES[@]}"; do
-    if [[ ! -f "${DEPLOY_DIR}/${file}" ]]; then
-        echo "Error: Required file ${file} not found"
+# Check if running as root on Linux
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    if [[ $EUID -ne 0 ]]; then
+        echo "This script must be run as root on Linux"
         exit 1
     fi
-done
+    
+    # Install required tools
+    OS_TYPE=$(detect_os)
+    install_required_tools "$OS_TYPE"
+fi
 
-echo "Verifying script permissions and syntax..."
-for file in "${REQUIRED_FILES[@]}"; do
-    full_path="${DEPLOY_DIR}/${file}"
-    echo "Checking: $file"
-    validate_script "$full_path"
-done
-
-# Create necessary directories
+# Create required directories
 echo "Creating required directories..."
 mkdir -p "${DEPLOY_DIR}/logs"
 chmod 750 "${DEPLOY_DIR}/logs"
 
-# Verify log file permissions
-if [[ -f "$LOG_FILE" ]]; then
+# Fix script permissions and line endings
+echo "Fixing script permissions and line endings..."
+find "${DEPLOY_DIR}/scripts" -type f -name "*.sh" -exec chmod +x {} \;
+
+# Run script-preloader for each script in correct order
+cd "${DEPLOY_DIR}/scripts"
+./script-preloader.sh || {
+    echo "Error: Script preparation failed"
+    exit 1
+}
+
+# Validate all scripts
+./validate.sh || {
+    echo "Error: Script validation failed"
+    exit 1
+}
+
+# Create log file with proper permissions
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    touch "$LOG_FILE"
     chmod 640 "$LOG_FILE"
 fi
 

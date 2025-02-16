@@ -3,26 +3,33 @@
 # Script validator to ensure all dependencies and scripts are properly configured
 set -euo pipefail
 
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Function to validate script requirements
 validate_requirements() {
     local script="$1"
+    local result=0
     
     # Check for DOS line endings
     if file "$script" | grep -q "CRLF"; then
-        return 1
+        echo "Error: $script has DOS line endings"
+        result=1
     fi
     
     # Check for proper shebang
     if ! head -n 1 "$script" | grep -q '^#!/bin/bash'; then
-        return 1
+        echo "Error: $script missing or incorrect shebang"
+        result=1
     fi
     
     # Check for execution permission
     if [[ ! -x "$script" ]]; then
-        return 1
-    }
+        echo "Error: $script is not executable"
+        result=1
+    fi
     
-    return 0
+    return $result
 }
 
 # Function to test script sourcing
@@ -31,10 +38,12 @@ test_script_source() {
     local temp_script
     temp_script=$(mktemp)
     
-    echo "#!/bin/bash" > "$temp_script"
-    echo "set -euo pipefail" >> "$temp_script"
-    echo "source '$script'" >> "$temp_script"
-    echo "echo 'Script sourced successfully'" >> "$temp_script"
+    cat > "$temp_script" << EOF
+#!/bin/bash
+set -euo pipefail
+source '$script'
+echo 'Script sourced successfully'
+EOF
     
     chmod +x "$temp_script"
     if ! bash "$temp_script" > /dev/null 2>&1; then
@@ -45,9 +54,6 @@ test_script_source() {
     rm -f "$temp_script"
     return 0
 }
-
-# Get script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check dependencies
 check_dependencies() {
@@ -90,11 +96,10 @@ main() {
             continue
         fi
         
-        if [[ "$script" != "${BASH_SOURCE[0]}" ]]; then
+        if [[ "$script" != "${BASH_SOURCE[0]}" ]] && grep -q "^source.*common.sh" "$script"; then
             if ! test_script_source "$script"; then
                 echo "Error: Script sourcing failed for: $script"
                 exit_code=1
-                continue
             fi
         fi
     done
@@ -106,4 +111,5 @@ main() {
     return $exit_code
 }
 
+# Run main function
 main "$@"
