@@ -1,10 +1,12 @@
 #!/bin/bash
 
+# Set strict mode
+set -euo pipefail
+
 # Common functions library for hardening scripts
 # Source this file in other scripts using:
 # source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Logging
 # Define color codes
 declare -r COLOR_RED='\033[0;31m'
 declare -r COLOR_GREEN='\033[0;32m'
@@ -274,6 +276,84 @@ verify_ssh_access() {
     return 0
 }
 
+# Verification functions
+test_2fa() {
+    local username="$1"
+    # Check if google-authenticator is configured
+    if [[ ! -f "/home/${username}/.google_authenticator" ]]; then
+        log "ERROR" "2FA not configured for $username"
+        return 1
+    fi
+    # Verify PAM configuration
+    if ! grep -q "auth required pam_google_authenticator.so" /etc/pam.d/sshd; then
+        log "ERROR" "PAM not configured for 2FA"
+        return 1
+    fi
+    return 0
+}
+
+verify_hardening() {
+    # Check SSH configuration
+    if ! sshd -t; then
+        log "ERROR" "SSH configuration is invalid"
+        return 1
+    fi
+    
+    # Check firewall status
+    if ! ufw status | grep -q "Status: active"; then
+        log "ERROR" "Firewall is not active"
+        return 1
+    fi
+    
+    # Check fail2ban status
+    if ! systemctl is-active --quiet fail2ban; then
+        log "ERROR" "fail2ban is not running"
+        return 1
+    fi
+    
+    # Verify system audit
+    if ! systemctl is-active --quiet auditd; then
+        log "ERROR" "audit system is not running"
+        return 1
+    fi
+    
+    return 0
+}
+
+verify_all_configurations() {
+    local username="$1"
+    local all_passed=true
+    
+    # Check user configuration
+    if ! verify_sudo_access "$username"; then
+        log "WARNING" "Sudo access verification failed"
+        all_passed=false
+    fi
+    
+    # Check SSH configuration
+    if ! check_ssh_key_setup "$username"; then
+        log "WARNING" "SSH key verification failed"
+        all_passed=false
+    fi
+    
+    # Check 2FA if enabled
+    if [[ -f "/home/${username}/.google_authenticator" ]]; then
+        if ! test_2fa "$username"; then
+            log "WARNING" "2FA verification failed"
+            all_passed=false
+        fi
+    fi
+    
+    # Check system hardening
+    if ! verify_hardening; then
+        log "WARNING" "System hardening verification failed"
+        all_passed=false
+    fi
+    
+    # Return overall status
+    [[ "$all_passed" == "true" ]]
+}
+
 # Script initialization
 init_script() {
     # Set error handling
@@ -301,3 +381,7 @@ init_script() {
         chmod 640 "$LOG_FILE"
     fi
 }
+
+# Initialize logging variables (before they're used)
+declare LOG_FILE=${LOG_FILE:-""}
+declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

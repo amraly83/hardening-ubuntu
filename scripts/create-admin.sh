@@ -1,15 +1,23 @@
 #!/bin/bash
-# Get the absolute path of the script directory
+
+# Set strict mode
+set -euo pipefail
+
+# Get absolute path of script directory and common.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="${SCRIPT_DIR}/common.sh"
 
 # Set log file first (before sourcing common.sh)
 LOG_FILE="/var/log/server-hardening.log"
 
-# Source common functions using absolute path
-source "${SCRIPT_DIR}/common.sh"
+# Convert line endings in common.sh if needed
+sed -i 's/\r$//' "$COMMON_SH"
 
-# Initialize script (this needs to be after sourcing common.sh)
-init_script
+# Source common functions
+source "$COMMON_SH" || { echo "Error: Failed to source $COMMON_SH"; exit 1; }
+
+# Initialize script (after sourcing common.sh)
+init_script || { echo "Error: Failed to initialize script"; exit 1; }
 
 # Get username with retry logic
 get_valid_username() {

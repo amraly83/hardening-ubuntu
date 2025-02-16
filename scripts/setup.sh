@@ -1,16 +1,25 @@
 #!/bin/bash
-# Fix permissions and line endings
-find "$(dirname "${BASH_SOURCE[0]}")" -name "*.sh" -type f -exec chmod +x {} \; -exec sed -i 's/\r$//' {} +
+
+# Set strict mode and prepare environment
+set -euo pipefail
 
 # Set log file first
-LOG_FILE="/var/log/server-setup.log"
+LOG_FILE="/var/log/server-hardening.log"
 
-# Source common functions - using full path resolution
+# Get absolute path of script directory and common.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/common.sh"
+COMMON_SH="${SCRIPT_DIR}/common.sh"
+PROGRESS_SH="${SCRIPT_DIR}/progress.sh"
 
-# Initialize script after sourcing
-init_script
+# Convert line endings if needed (in case edited on Windows)
+find "$SCRIPT_DIR" -name "*.sh" -type f -exec sed -i 's/\r$//' {} +
+
+# Source required scripts
+source "$COMMON_SH" || { echo "Error: Failed to source $COMMON_SH"; exit 1; }
+source "$PROGRESS_SH" || { echo "Error: Failed to source $PROGRESS_SH"; exit 1; }
+
+# Initialize script
+init_script || { echo "Error: Failed to initialize script"; exit 1; }
 
 check_prerequisites() {
     log "INFO" "Checking prerequisites..."
@@ -178,18 +187,74 @@ run_hardening() {
     fi
 }
 
+# Function to prompt for continuation with progress tracking
+confirm_continue() {
+    local step="$1"
+    local default="${2:-yes}"
+    
+    track_progress "$step" "completed"
+    echo -e "\nStep completed: $step"
+    show_progress
+    
+    if ! prompt_yes_no "Continue to next step?" "$default"; then
+        if ! prompt_yes_no "Are you sure you want to exit?" "no"; then
+            return 0
+        fi
+        log "INFO" "Setup paused after $step"
+        echo "You can resume setup later by running this script again"
+        exit 0
+    fi
+    return 0
+}
+
+# Function to verify step completion with progress tracking
+verify_step() {
+    local step="$1"
+    local check_command="$2"
+    
+    log "INFO" "Verifying step: $step"
+    track_progress "$step" "verifying"
+    
+    if ! eval "$check_command"; then
+        log "ERROR" "Verification failed for: $step"
+        track_progress "$step" "failed"
+        if ! prompt_yes_no "Retry this step?" "yes"; then
+            error_exit "Setup failed at: $step"
+        fi
+        return 1
+    fi
+    
+    log "SUCCESS" "Verified successfully: $step"
+    track_progress "$step" "verified"
+    return 0
+}
+
+# Main setup process with progress tracking
 main() {
+    # Check if resuming from previous session
+    if resume_from_last; then
+        if prompt_yes_no "Resume from last completed step?" "yes"; then
+            log "INFO" "Resuming setup"
+        else
+            if ! prompt_yes_no "Start fresh? This will reset progress" "no"; then
+                exit 0
+            fi
+            rm -f "$PROGRESS_FILE"
+        fi
+    fi
+    
     # Display welcome message
     echo "================================================================"
     echo "Ubuntu Server Security Hardening Setup"
     echo "This script will guide you through the server hardening process"
     echo "================================================================"
     
-    # Check prerequisites (minimal check for required files)
+    # Check prerequisites
     check_prerequisites
+    confirm_continue "Prerequisites verification"
     
-    # Create admin user and store the username
-    USERNAME=""
+    # Setup admin user with verification
+    local USERNAME=""
     while [[ -z "$USERNAME" ]]; do
         USERNAME=$(setup_admin_user)
         USERNAME=$(echo "$USERNAME" | tr -d '\n')
@@ -199,21 +264,46 @@ main() {
         fi
     done
     
-    # Verify username is valid
-    if ! validate_username "$USERNAME"; then
-        error_exit "Invalid username after creation: $USERNAME"
+    verify_step "Admin user setup" "verify_sudo_access '$USERNAME'" || {
+        error_exit "Failed to verify admin user setup"
+    }
+    confirm_continue "Admin user setup"
+    
+    # Setup SSH keys with verification
+    setup_ssh_keys "$USERNAME"
+    verify_step "SSH key setup" "check_ssh_key_setup '$USERNAME'" || {
+        error_exit "Failed to verify SSH key setup"
+    }
+    confirm_continue "SSH key setup"
+    
+    # Setup 2FA if requested
+    if prompt_yes_no "Would you like to set up 2FA?" "yes"; then
+        setup_2fa "$USERNAME"
+        verify_step "2FA setup" "test_2fa '$USERNAME'" || {
+            error_exit "Failed to verify 2FA setup"
+        }
+        confirm_continue "2FA setup"
     fi
     
-    # Set up SSH keys
-    setup_ssh_keys "$USERNAME"
-    
-    # Set up 2FA
-    setup_2fa "$USERNAME"
-    
-    # Run system hardening
-    run_hardening
+    # Run system hardening with verification
+    if prompt_yes_no "Proceed with system hardening?" "yes"; then
+        run_hardening
+        verify_step "System hardening" "verify_hardening" || {
+            error_exit "Failed to verify system hardening"
+        }
+        confirm_continue "System hardening"
+    fi
     
     # Final verification
+    log "INFO" "Running final verification..."
+    if ! verify_all_configurations "$USERNAME"; then
+        log "WARNING" "Some verifications failed. Please check the logs."
+        if ! prompt_yes_no "Continue despite verification warnings?" "no"; then
+            error_exit "Setup incomplete - verification failed"
+        fi
+    fi
+    
+    # Setup complete
     echo "=== Setup Complete ==="
     echo "Please verify:"
     echo "1. SSH access works with your key"
@@ -224,4 +314,9 @@ main() {
     log "INFO" "Setup completed successfully"
 }
 
-main "$@"
+# Run main function with error handling
+main "$@" || {
+    log "ERROR" "Setup failed"
+    track_progress "setup" "failed"
+    exit 1
+}

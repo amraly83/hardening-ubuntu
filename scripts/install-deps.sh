@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Set strict mode
+set -euo pipefail
+
 # Source common functions
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -14,62 +17,50 @@ if [[ "$OSTYPE" != "linux-gnu"* ]]; then
 fi
 
 # Required packages list
-REQUIRED_PACKAGES=(
-    "openssh-server"
-    "libpam-google-authenticator"
-    "ufw"
-    "fail2ban"
-    "sudo"
-    "git"
-    "bc"
-    "unattended-upgrades"
-    "apt-listchanges"
-    "postfix"
-    "apparmor"
-    "auditd"
+PACKAGES=(
+    "jq"              # For progress tracking JSON handling
+    "dos2unix"        # For line ending fixes
+    "openssh-server"  # For SSH configuration
+    "ufw"            # For firewall management
+    "fail2ban"       # For intrusion prevention
+    "auditd"         # For system auditing
+    "libpam-google-authenticator" # For 2FA
 )
 
 # Function to check if package is installed
 is_package_installed() {
-    local package="$1"
-    if ! command -v dpkg >/dev/null 2>&1; then
-        log "WARNING" "dpkg not found, cannot check package installation"
-        return 0
-    }
-    dpkg -l "$1" 2>/dev/null | grep -q "^ii"
-    return $?
+    dpkg -l "$1" &>/dev/null
 }
 
-# Function to install packages
-install_package() {
-    local package="$1"
-    log "INFO" "Installing $package..."
+# Function to install missing packages
+install_missing_packages() {
+    local missing_packages=()
     
-    if ! command -v apt-get >/dev/null 2>&1; then
-        log "WARNING" "apt-get not found, skipping package installation"
-        return 0
-    }
+    echo "Checking required packages..."
+    for package in "${PACKAGES[@]}"; do
+        if ! is_package_installed "$package"; then
+            missing_packages+=("$package")
+        fi
+    done
     
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"; then
-        log "WARNING" "Failed to install $package"
-        return 1
-    fi
-}
-
-# Function to configure postfix if needed
-configure_postfix() {
-    if ! is_package_installed "postfix"; then
-        log "INFO" "Configuring postfix..."
-        # Set up postfix in non-interactive mode
-        debconf-set-selections <<< "postfix postfix/mailname string $(hostname -f)"
-        debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
-        install_package "postfix"
+    if [[ ${#missing_packages[@]} -gt 0 ]]; then
+        echo "Installing missing packages: ${missing_packages[*]}"
+        apt-get update
+        apt-get install -y "${missing_packages[@]}"
+    else
+        echo "All required packages are already installed"
     fi
 }
 
 # Main installation function
 main() {
     log "INFO" "Starting dependency check..."
+    
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        echo "This script must be run as root" 
+        exit 1
+    fi
     
     # Check if we're on a Debian-based system
     if [[ ! -f /etc/debian_version ]]; then
@@ -84,41 +75,26 @@ main() {
     else
         log "WARNING" "apt-get not found, skipping package operations"
         return 0
-    }
+    fi
     
-    # Check installed packages
-    local missing_packages=()
-    for package in "${REQUIRED_PACKAGES[@]}"; do
+    # Create required directories
+    mkdir -p /var/log/hardening
+    chmod 750 /var/log/hardening
+    
+    # Install packages
+    install_missing_packages
+    
+    # Verify installations
+    local failed_packages=()
+    for package in "${PACKAGES[@]}"; do
         if ! is_package_installed "$package"; then
-            missing_packages+=("$package")
+            failed_packages+=("$package")
         fi
     done
     
-    if [ ${#missing_packages[@]} -eq 0 ]; then
-        log "INFO" "All required packages are already installed"
-        return 0
-    fi
-    
-    # Report missing packages
-    log "INFO" "Missing packages: ${missing_packages[*]}"
-    if ! prompt_yes_no "Would you like to install missing packages" "yes"; then
-        log "WARNING" "Skipping package installation"
-        return 0
-    fi
-    
-    # Try to install missing packages
-    local failed=0
-    for package in "${missing_packages[@]}"; do
-        if ! install_package "$package"; then
-            ((failed++))
-        fi
-    done
-    
-    if [ "$failed" -gt 0 ]; then
-        log "WARNING" "$failed package(s) failed to install"
-        if ! prompt_yes_no "Continue despite package installation failures" "no"; then
-            error_exit "Package installation failed"
-        fi
+    if [[ ${#failed_packages[@]} -gt 0 ]]; then
+        echo "Failed to install packages: ${failed_packages[*]}"
+        exit 1
     fi
     
     log "INFO" "Dependency check completed"

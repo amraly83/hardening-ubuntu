@@ -198,6 +198,58 @@ Step 3: Auto-Recovery
 - Review service logs: `journalctl -u service_name`
 - Restart service: `sudo systemctl restart service_name`
 
+## Script Execution Issues
+
+### Line Ending Errors
+**Problem**: Syntax errors related to unexpected tokens, especially with `}` or line endings
+```
+./scripts/common.sh: line X: syntax error near unexpected token `}'
+```
+**Solution**:
+1. Run the prepare-deploy.sh script first:
+   ```bash
+   ./prepare-deploy.sh
+   ```
+2. Manual fix if needed:
+   ```bash
+   sed -i 's/\r$//' scripts/*.sh
+   ```
+
+### Function Not Found Errors
+**Problem**: Commands like `init_script` or `prompt_yes_no` not found
+**Solution**:
+1. Ensure common.sh is properly sourced:
+   ```bash
+   source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+   ```
+2. Check script initialization order:
+   - LOG_FILE must be set before sourcing common.sh
+   - common.sh must be sourced before calling any functions
+   - init_script must be called after sourcing common.sh
+
+## New Installation Checklist
+Before running any scripts:
+1. Run prepare-deploy.sh first
+2. Verify script permissions
+3. Check log directory permissions
+4. Ensure running as root/sudo
+5. Validate all prerequisites
+
+## Script Initialization Order
+For proper script execution:
+1. Set LOG_FILE variable
+2. Source common.sh
+3. Call init_script
+4. Run main script functions
+
+## Emergency Recovery
+If you encounter script errors:
+1. Run prepare-deploy.sh again
+2. Check log files for specific errors
+3. Verify file permissions
+4. Ensure proper line endings
+5. Validate script syntax
+
 ### Getting Help
 If you encounter an issue not covered here:
 1. Check the server-hardening.log file
