@@ -340,15 +340,20 @@ verify_admin_setup() {
     if [[ $EUID -eq 0 ]]; then
         log "DEBUG" "Initializing sudo configuration..."
         
-        # Ensure sudoers.d exists and has correct permissions
-        if [[ ! -d "/etc/sudoers.d" ]]; then
-            mkdir -p "/etc/sudoers.d"
-            chmod 750 "/etc/sudoers.d"
+        # Ensure proper sudoers.d setup
+        log "DEBUG" "Setting up sudoers.d directory"
+        mkdir -p /etc/sudoers.d
+        chmod 750 /etc/sudoers.d
+        
+        # Create sudoers include if missing
+        if ! grep -q "^#includedir /etc/sudoers.d" /etc/sudoers; then
+            echo "#includedir /etc/sudoers.d" >> /etc/sudoers
         fi
         
-        # Create or update sudoers file
+        # Create or update sudoers file with NOPASSWD initially
         local sudoers_file="/etc/sudoers.d/$username"
-        echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+        log "DEBUG" "Creating temporary NOPASSWD sudo access"
+        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
         chmod 440 "$sudoers_file"
         
         # Validate sudoers syntax
@@ -358,51 +363,94 @@ verify_admin_setup() {
             return 1
         fi
         
-        # Reset sudo timestamp
-        log "DEBUG" "Resetting sudo timestamp for $username"
-        sudo -K -u "$username" 2>/dev/null || true
-        sleep 1
+        # Reset sudo timestamp and environment
+        log "DEBUG" "Resetting sudo environment"
+        sudo -k || true  # Reset all sudo timestamps
+        sudo -K -u "$username" 2>/dev/null || true  # Reset user's sudo timestamp
         
-        # Re-add to sudo group to refresh membership
-        log "DEBUG" "Refreshing sudo group membership"
-        usermod -aG sudo "$username"
+        # Ensure clean environment for sudo tests
+        unset SUDO_ASKPASS SUDO_EDITOR SUDO_PROMPT || true
+        
+        # Force refresh of user's groups
+        log "DEBUG" "Refreshing group membership"
         pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
-        sleep 2
         
-        # Force group update by starting new session
-        log "DEBUG" "Testing sudo access with new session"
-        if su - "$username" -c "sudo -v" >/dev/null 2>&1; then
-            log "SUCCESS" "Sudo initialization successful"
-        else
-            log "WARNING" "Initial sudo test failed, attempting fixes..."
-            
-            # Try direct sudo command
-            if su - "$username" -c "sudo true" >/dev/null 2>&1; then
-                log "SUCCESS" "Direct sudo command successful"
-            else
-                # Check PAM configuration
-                if ! grep -q "auth.*pam_wheel.so" /etc/pam.d/sudo 2>/dev/null; then
-                    log "DEBUG" "Adding wheel group to PAM configuration"
-                    echo "auth required pam_wheel.so use_uid" >> /etc/pam.d/sudo
-                fi
-                
-                # One final attempt after PAM fix
-                if ! su - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-                    log "ERROR" "Failed to initialize sudo access after fixes"
-                    return 1
-                fi
+        # Try multiple sudo initialization methods
+        log "DEBUG" "Attempting sudo initialization methods..."
+        
+        # Method 1: Direct sudo command
+        if su -l "$username" -c "sudo -n true" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified with direct command"
+            # Switch to password-required configuration
+            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+            chmod 440 "$sudoers_file"
+            return 0
+        fi
+        
+        log "DEBUG" "Direct sudo command failed, trying alternatives..."
+        
+        # Method 2: Use sudo with explicit path
+        if su -l "$username" -c "/usr/bin/sudo -n /bin/true" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified with explicit path"
+            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+            chmod 440 "$sudoers_file"
+            return 0
+        fi
+        
+        # Method 3: Try with PAM session initialization
+        log "DEBUG" "Attempting PAM session initialization"
+        if ! grep -q "session.*required.*pam_unix.so" /etc/pam.d/sudo; then
+            echo "session required pam_unix.so" >> /etc/pam.d/sudo
+        fi
+        
+        # Method 4: Ensure proper PAM configuration
+        if ! grep -q "auth.*sufficient.*pam_unix.so" /etc/pam.d/sudo; then
+            cp /etc/pam.d/sudo /etc/pam.d/sudo.bak
+            sed -i '1i auth sufficient pam_unix.so' /etc/pam.d/sudo
+        fi
+        
+        # Method 5: Try with group refresh and new shell
+        log "DEBUG" "Attempting with new shell and group refresh"
+        if su -l "$username" -s /bin/bash -c "newgrp sudo >/dev/null 2>&1 && sudo -n true" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified after group refresh"
+            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+            chmod 440 "$sudoers_file"
+            return 0
+        fi
+        
+        # If all methods failed, collect diagnostic information
+        log "DEBUG" "Collecting sudo diagnostic information..."
+        
+        # Check sudo version and capabilities
+        local sudo_version
+        sudo_version=$(sudo -V | head -n1)
+        log "DEBUG" "Sudo version: $sudo_version"
+        
+        # Check PAM configuration
+        if [ -f /etc/pam.d/sudo ]; then
+            local pam_config
+            pam_config=$(grep -v '^#' /etc/pam.d/sudo)
+            log "DEBUG" "PAM sudo configuration: $pam_config"
+        fi
+        
+        # Check for any sudo errors in auth.log
+        if [ -f /var/log/auth.log ]; then
+            local auth_errors
+            auth_errors=$(grep "sudo.*$username" /var/log/auth.log | tail -n5)
+            if [ -n "$auth_errors" ]; then
+                log "DEBUG" "Recent sudo auth errors: $auth_errors"
             fi
         fi
-    fi
-    
-    # Final verification with diagnostic output
-    local sudo_test_output
-    sudo_test_output=$(su - "$username" -c "sudo -n true" 2>&1)
-    if [[ $? -eq 0 ]]; then
-        log "SUCCESS" "Admin setup verified for $username"
-        return 0
+        
+        # Final attempt with debug output
+        local debug_output
+        debug_output=$(su -l "$username" -c "sudo -v" 2>&1)
+        log "DEBUG" "Final sudo verification output: $debug_output"
+        
+        log "ERROR" "All sudo initialization methods failed"
+        return 1
     else
-        log "ERROR" "Final sudo test failed with output: $sudo_test_output"
+        log "ERROR" "Root privileges required for sudo initialization"
         return 1
     fi
 }

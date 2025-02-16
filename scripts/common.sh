@@ -442,28 +442,72 @@ ensure_sudo_membership() {
     while [[ $attempt -le $max_attempts ]]; do
         log "DEBUG" "Checking sudo membership (attempt $attempt/$max_attempts)"
         
+        # First check if sudo group exists
+        if ! getent group sudo >/dev/null 2>&1; then
+            log "DEBUG" "Creating sudo group"
+            groupadd sudo || {
+                log "ERROR" "Failed to create sudo group"
+                return 1
+            }
+        fi
+        
         # Check current groups
-        if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+        local current_groups
+        current_groups=$(groups "$username" 2>&1)
+        log "DEBUG" "Current groups before modification: $current_groups"
+        
+        if echo "$current_groups" | grep -qE '\b(sudo|admin|wheel)\b'; then
             log "SUCCESS" "User $username is in sudo group"
+            # Verify group file entry
+            if ! grep -q "^sudo:.*:.*:.*\b${username}\b" /etc/group; then
+                log "DEBUG" "Fixing group file entry"
+                usermod -aG sudo "$username" || true
+            fi
             return 0
         fi
         
         log "WARNING" "User $username not in sudo group, attempting to add..."
         
-        # Try to add to sudo group
-        if usermod -aG sudo "$username"; then
-            log "INFO" "Added $username to sudo group"
-            
-            # Force group update
-            if pkill -SIGHUP -u "$username" >/dev/null 2>&1; then
-                log "DEBUG" "Sent SIGHUP to user processes"
+        # Try different methods to add to sudo group
+        if ! usermod -aG sudo "$username"; then
+            log "DEBUG" "usermod failed, trying direct group file modification"
+            # Backup group file
+            cp /etc/group /etc/group.bak
+            # Try to add directly to group file
+            if ! sed -i "/^sudo:/s/$/,${username}/" /etc/group; then
+                log "ERROR" "Failed to modify group file"
+                mv /etc/group.bak /etc/group
             fi
-            
-            # Verify group membership again
-            if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
-                log "SUCCESS" "Verified sudo group membership"
-                return 0
-            fi
+        fi
+        
+        # Force group update
+        log "DEBUG" "Forcing group update"
+        pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+        
+        # Try newgrp method
+        su - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
+        
+        # Create or update sudoers entry
+        if [[ ! -f "/etc/sudoers.d/$username" ]]; then
+            log "DEBUG" "Creating sudoers entry"
+            echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+            chmod 440 "/etc/sudoers.d/$username"
+        fi
+        
+        # Verify group membership again with newgrp
+        if su - "$username" -c "newgrp sudo >/dev/null 2>&1 && groups" | grep -qE '\b(sudo|admin|wheel)\b'; then
+            log "SUCCESS" "Verified sudo group membership with newgrp"
+            return 0
+        fi
+        
+        # If still not in group, try restarting session
+        log "DEBUG" "Attempting session restart for group update"
+        pkill -KILL -u "$username" >/dev/null 2>&1 || true
+        sleep 2
+        
+        if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+            log "SUCCESS" "Sudo group membership verified after session restart"
+            return 0
         fi
         
         log "WARNING" "Sudo group modification attempt $attempt failed"
