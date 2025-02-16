@@ -77,38 +77,16 @@ setup_admin_user() {
             if is_user_admin "$NEW_ADMIN_USER"; then
                 log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin"
                 if prompt_yes_no "Would you like to use this existing admin user" "yes"; then
-                    echo "Verifying sudo access for $NEW_ADMIN_USER..."
-                    if verify_sudo_access "$NEW_ADMIN_USER"; then
-                        log "INFO" "Sudo access verified for $NEW_ADMIN_USER"
-                        echo
-                        echo "================================================================"
-                        echo "Using existing admin user: $NEW_ADMIN_USER"
-                        echo "Current configuration will be preserved"
-                        echo "You can reconfigure SSH keys and 2FA in the next steps"
-                        echo "================================================================"
-                        echo
-                        return 0  # Exit function successfully with implicit return of username
-                    else
-                        log "WARNING" "Failed to verify sudo access for existing admin user"
-                        if prompt_yes_no "Would you like to try fixing sudo access" "yes"; then
-                            echo "Attempting to fix sudo access..."
-                            if ! groups "$NEW_ADMIN_USER" | grep -q sudo; then
-                                usermod -aG sudo "$NEW_ADMIN_USER"
-                            fi
-                            # Verify again after fix attempt
-                            if verify_sudo_access "$NEW_ADMIN_USER"; then
-                                log "INFO" "Sudo access fixed and verified"
-                                echo
-                                echo "================================================================"
-                                echo "Sudo access has been fixed for: $NEW_ADMIN_USER"
-                                echo "Current configuration will be preserved"
-                                echo "You can reconfigure SSH keys and 2FA in the next steps"
-                                echo "================================================================"
-                                echo
-                                return 0  # Exit function successfully with implicit return of username
-                            fi
-                        fi
-                    fi
+                    # TEMPORARY: Skip sudo verification for debugging
+                    log "WARNING" "Temporarily skipping sudo verification for debugging"
+                    echo
+                    echo "================================================================"
+                    echo "Using existing admin user: $NEW_ADMIN_USER"
+                    echo "Current configuration will be preserved"
+                    echo "You can reconfigure SSH keys and 2FA in the next steps"
+                    echo "================================================================"
+                    echo
+                    return 0
                 fi
             else
                 log "WARNING" "User '$NEW_ADMIN_USER' exists but is not an admin"

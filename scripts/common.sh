@@ -173,37 +173,52 @@ verify_sudo_access() {
     local retry=0
     local delay=1
     
+    log "INFO" "Starting sudo access verification for $username..."
+    
     # First check if user exists
     if ! id "$username" >/dev/null 2>&1; then
         log "ERROR" "User $username does not exist"
         return 1
     fi
+    log "SUCCESS" "User existence verified"
     
     # Check if user is in sudo group first
     if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
         log "WARNING" "User $username is not in the sudo group"
         return 1
     fi
+    log "SUCCESS" "User sudo group membership verified"
     
     # Try to refresh group membership
+    log "INFO" "Attempting to refresh group membership..."
     if ! newgrp sudo >/dev/null 2>&1; then
         log "DEBUG" "Failed to refresh group membership, continuing anyway"
     fi
     
+    log "INFO" "Testing sudo access with timeout..."
     while [[ $retry -lt $max_retries ]]; do
-        # Try sudo access with shorter timeout to prevent hanging
-        if timeout 5s su - "$username" -c "sudo -n true" 2>/dev/null; then
-            log "DEBUG" "Sudo access verified for $username"
+        log "INFO" "Sudo verification attempt $((retry + 1))/$max_retries"
+        # Try sudo access with shorter timeout and capture error
+        if su - "$username" -c "sudo -nv" 2>/dev/null; then
+            log "SUCCESS" "Sudo access verified successfully for $username"
             return 0
         fi
         
-        log "WARNING" "Sudo access verification failed, attempt $((retry + 1))/$max_retries"
-        sleep $delay
-        ((retry++))
-        ((delay *= 2))
+        local exit_code=$?
+        log "WARNING" "Sudo verification attempt $((retry + 1)) failed (exit code: $exit_code)"
+        
+        if [[ $retry -lt $((max_retries - 1)) ]]; then
+            log "INFO" "Waiting ${delay}s before next attempt..."
+            sleep $delay
+            ((retry++))
+            ((delay *= 2))
+        else
+            break
+        fi
     done
     
     log "ERROR" "All sudo verification attempts failed for $username"
+    log "INFO" "Please ensure user has proper sudo privileges and try again"
     return 1
 }
 
