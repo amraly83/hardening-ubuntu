@@ -1,1 +1,20 @@
+# Server Hardening Configuration
+# Copy this file to /etc/server-hardening/hardening.conf and modify as needed
+
+# SSH Configuration
+SSH_PORT="3333"
+SSH_ALLOW_USERS=""  # Space-separated list of users allowed to SSH
+ADMIN_EMAIL=""      # Email for security notifications
+
+# Firewall Configuration
+# Comma-separated list of additional ports to open
+FIREWALL_ADDITIONAL_PORTS="80,443,3306,465,587,993,995"
+
+# Security Features
+MFA_ENABLED="yes"           # Enable Multi-Factor Authentication
+ENABLE_AUTO_UPDATES="yes"   # Enable automatic security updates
+ENABLE_IPV6="no"           # Disable IPv6 by default
+
+# Backup Configuration
+BACKUP_RETENTION_DAYS="30"  # Number of days to keep backups
 
