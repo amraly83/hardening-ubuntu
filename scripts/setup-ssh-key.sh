@@ -12,13 +12,16 @@ clean_input() {
     local input="$1"
 
     # Remove all ANSI escape sequences including colors, cursor movements, etc.
-    cleaned=$(echo "$input" | sed -r 's/\x1B\[([0-9]{1,2}(;[0-9]{1,2})*)?[mGK]//g')
+    cleaned=$(echo "$input" | sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g')
 
     # Remove log prefixes with more robust pattern matching
-    cleaned=$(echo "$cleaned" | sed -r 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //')
+    cleaned=$(echo "$cleaned" | sed -r 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //g')
 
     # Remove any remaining non-alphanumeric characters from start/end
-    cleaned=$(echo "$cleaned" | sed -r 's/^[^a-zA-Z0-9_]*//;s/[^a-zA-Z0-9_]*$//')
+    cleaned=$(echo "$cleaned" | sed -r 's/^[^a-zA-Z0-9_]+//;s/[^a-zA-Z0-9_]+$//g')
+
+    # Remove leading/trailing whitespace
+    cleaned=$(echo "$cleaned" | sed -r 's/^[[:space:]]+//;s/[[:space:]]+$//g')
 
     # Debug logging
     log "DEBUG" "Original input: $input"
@@ -37,7 +40,12 @@ validate_username_input() {
 if [ -z "${1:-}" ]; then
     while true; do
         read -p "Enter username to setup SSH key for: " USERNAME
-        USERNAME=$(clean_input "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+        USERNAME=$(clean_input "$USERNAME")
+        if [ -z "$USERNAME" ]; then
+            log "ERROR" "Username cannot be empty after cleaning."
+            continue
+        fi
+        USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
         if validate_username_input "$USERNAME"; then
             break
         else
@@ -45,7 +53,11 @@ if [ -z "${1:-}" ]; then
         fi
     done
 else
-    USERNAME=$(clean_input "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+    USERNAME=$(clean_input "$1")
+    if [ -z "$USERNAME" ]; then
+        error_exit "Username cannot be empty after cleaning."
+    fi
+    USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     if ! validate_username_input "$USERNAME"; then
         error_exit "Invalid username format: '$1' - must be lowercase, start with letter/underscore, 1-32 chars"
     fi
