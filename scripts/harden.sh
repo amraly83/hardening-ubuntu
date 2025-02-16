@@ -14,9 +14,9 @@ readonly LOCK_FILE="/var/run/server-hardening.lock"
 readonly REQUIRED_SPACE=1024  # Required free space in MB
 
 # Configuration variables with defaults
-SSH_PORT="3333"
-SSH_ALLOW_USERS="amraly"
-ADMIN_EMAIL="amraly1983@gmail.com"
+SSH_PORT=""
+SSH_ALLOW_USERS=""
+ADMIN_EMAIL=""
 FAIL2BAN_BANTIME="24h"
 FAIL2BAN_FINDTIME="48h"
 FAIL2BAN_MAXRETRY="5"
