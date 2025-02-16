@@ -154,15 +154,27 @@ verify_sudo_access() {
     local retry=0
     local delay=2
     
+    # First check if user exists
+    if ! id "$username" >/dev/null 2>&1; then
+        log "ERROR" "User $username does not exist"
+        return 1
+    fi
+    
+    # Check if user is in sudo group first
+    if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+        log "WARNING" "User $username is not in the sudo group"
+        return 1
+    fi
+    
+    # Try to refresh group membership
+    if ! newgrp sudo >/dev/null 2>&1; then
+        log "DEBUG" "Failed to refresh group membership, continuing anyway"
+    fi
+    
     while [[ $retry -lt $max_retries ]]; do
-        # First check if user is in sudo group
-        if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
-            log "WARNING" "User $username is not in the sudo group"
-            return 1
-        fi
-        
         # Try sudo access with timeout to prevent hanging
         if timeout 10s su - "$username" -c "sudo -n true" 2>/dev/null; then
+            log "DEBUG" "Sudo access verified for $username"
             return 0
         fi
         
@@ -172,6 +184,7 @@ verify_sudo_access() {
         ((delay *= 2))
     done
     
+    log "ERROR" "All sudo verification attempts failed for $username"
     return 1
 }
 
