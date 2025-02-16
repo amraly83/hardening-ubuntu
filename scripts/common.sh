@@ -5,14 +5,33 @@
 # source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # Logging
+# Define color codes
+declare -r COLOR_RED='\033[0;31m'
+declare -r COLOR_GREEN='\033[0;32m'
+declare -r COLOR_YELLOW='\033[1;33m'
+declare -r COLOR_BLUE='\033[0;34m'
+declare -r COLOR_RESET='\033[0m'
+
 log() {
     local level="$1"
     shift
     local message="$*"
     local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [${level}] ${message}"
+    local color=""
     
-    # If LOG_FILE is defined, also log to file
+    # Set color based on log level
+    case "${level^^}" in
+        "ERROR") color="$COLOR_RED" ;;
+        "WARNING") color="$COLOR_YELLOW" ;;
+        "SUCCESS"|"INFO") color="$COLOR_GREEN" ;;
+        "DEBUG") color="$COLOR_BLUE" ;;
+        *) color="$COLOR_RESET" ;;
+    esac
+    
+    # Print to console with color
+    echo -e "${color}[${timestamp}] [${level}] ${message}${COLOR_RESET}"
+    
+    # If LOG_FILE is defined, log to file without color codes
     if [[ -n "${LOG_FILE:-}" ]]; then
         echo "[${timestamp}] [${level}] ${message}" >> "$LOG_FILE"
     fi
@@ -150,9 +169,9 @@ prompt_yes_no() {
 # Verification
 verify_sudo_access() {
     local username="$1"
-    local max_retries=3
+    local max_retries=2
     local retry=0
-    local delay=2
+    local delay=1
     
     # First check if user exists
     if ! id "$username" >/dev/null 2>&1; then
@@ -172,8 +191,8 @@ verify_sudo_access() {
     fi
     
     while [[ $retry -lt $max_retries ]]; do
-        # Try sudo access with timeout to prevent hanging
-        if timeout 10s su - "$username" -c "sudo -n true" 2>/dev/null; then
+        # Try sudo access with shorter timeout to prevent hanging
+        if timeout 5s su - "$username" -c "sudo -n true" 2>/dev/null; then
             log "DEBUG" "Sudo access verified for $username"
             return 0
         fi
