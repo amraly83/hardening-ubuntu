@@ -57,13 +57,16 @@ check_prerequisites() {
 }
 
 setup_admin_user() {
-    echo "=== Step 1: Admin User Setup ==="
+    echo -e "\n=== Step 1: Admin User Setup ==="
     local NEW_ADMIN_USER
     local max_attempts=3
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
         read -p "Enter username for the new admin user: " NEW_ADMIN_USER
+        
+        # Clean any color codes and special characters from input
+        NEW_ADMIN_USER=$(echo "$NEW_ADMIN_USER" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -cd 'a-z0-9-')
         
         # First validate the username format
         if ! validate_username "$NEW_ADMIN_USER" 2>/dev/null; then
@@ -86,6 +89,7 @@ setup_admin_user() {
                     echo "You can reconfigure SSH keys and 2FA in the next steps"
                     echo "================================================================"
                     echo
+                    printf "%s" "$NEW_ADMIN_USER"  # Use printf to avoid extra newlines
                     return 0
                 fi
             else
@@ -144,7 +148,10 @@ setup_admin_user() {
 
 setup_ssh_keys() {
     local username="$1"
-    echo "=== Step 2: SSH Key Setup ==="
+    echo -e "\n=== Step 2: SSH Key Setup ==="
+    
+    # Clean any color codes from username
+    username=$(echo "$username" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -d '\n')
     
     log "INFO" "Setting up SSH keys for $username"
     echo "Please have your SSH public key ready (from your local machine's ~/.ssh/id_ed25519.pub)"
@@ -211,10 +218,15 @@ main() {
     # Check prerequisites
     check_prerequisites
     
-    # Create admin user if needed
-    USERNAME=$(setup_admin_user)
+    # Create admin user if needed and store the clean username
+    USERNAME=$(setup_admin_user | tr -d '\n')  # Remove any newlines from output
     
-    # Set up SSH keys
+    # Validate username before proceeding
+    if [[ -z "$USERNAME" ]] || ! validate_username "$USERNAME" 2>/dev/null; then
+        error_exit "Failed to get valid username"
+    fi
+    
+    # Set up SSH keys with clean username
     setup_ssh_keys "$USERNAME"
     
     # Set up 2FA
