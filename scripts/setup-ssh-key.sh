@@ -9,8 +9,13 @@ init_script
 
 # Clean input from any ANSI codes and log prefixes
 clean_input() {
-    echo "$1" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})?[mGK]//g" | \
-        sed -E 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //'
+    # Remove ANSI escape sequences using a more portable sed syntax
+    cleaned=$(echo "$1" | sed 's/\x1B\[[0-9;]*[mGK]//g')
+    
+    # Remove log prefixes using basic pattern matching
+    cleaned=$(echo "$cleaned" | sed 's/^\[[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\] \[\(DEBUG\|INFO\|WARNING\|ERROR\)\] //')
+    
+    echo "$cleaned"
 }
 
 # Validate and get username
