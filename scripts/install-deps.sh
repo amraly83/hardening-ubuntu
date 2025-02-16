@@ -3,18 +3,26 @@
 # Set strict mode
 set -euo pipefail
 
-# Source common functions
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Initialize script with Windows-compatible paths
+# Set log file before sourcing common.sh
 LOG_FILE="${TEMP:-/tmp}/server-hardening.log"
-init_script
 
-# Early environment check
-if [[ "$OSTYPE" != "linux-gnu"* ]]; then
-    log "WARNING" "Not running on Linux. Dependencies will not be installed."
-    exit 0
-fi
+# Fix line endings in common.sh
+sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
+
+# Source common functions
+source "${SCRIPT_DIR}/common.sh" || {
+    echo "Error: Failed to source common.sh"
+    exit 1
+}
+
+# Initialize script
+init_script || {
+    echo "Error: Failed to initialize script"
+    exit 1
+}
 
 # Required packages list
 PACKAGES=(
@@ -36,7 +44,7 @@ is_package_installed() {
 install_missing_packages() {
     local missing_packages=()
     
-    echo "Checking required packages..."
+    log "INFO" "Checking required packages..."
     for package in "${PACKAGES[@]}"; do
         if ! is_package_installed "$package"; then
             missing_packages+=("$package")
@@ -44,11 +52,11 @@ install_missing_packages() {
     done
     
     if [[ ${#missing_packages[@]} -gt 0 ]]; then
-        echo "Installing missing packages: ${missing_packages[*]}"
+        log "INFO" "Installing missing packages: ${missing_packages[*]}"
         apt-get update
-        apt-get install -y "${missing_packages[@]}"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
     else
-        echo "All required packages are already installed"
+        log "INFO" "All required packages are already installed"
     fi
 }
 
@@ -56,24 +64,20 @@ install_missing_packages() {
 main() {
     log "INFO" "Starting dependency check..."
     
+    # Early environment check
+    if [[ "$OSTYPE" != "linux-gnu"* ]]; then
+        log "WARNING" "Not running on Linux. Dependencies will not be installed."
+        exit 0
+    fi
+    
     # Check if running as root
     if [[ $EUID -ne 0 ]]; then
-        echo "This script must be run as root" 
-        exit 1
+        error_exit "This script must be run as root"
     fi
     
     # Check if we're on a Debian-based system
     if [[ ! -f /etc/debian_version ]]; then
         log "WARNING" "Not running on a Debian-based system, skipping package installation"
-        return 0
-    }
-    
-    # Update package lists if possible
-    if command -v apt-get >/dev/null 2>&1; then
-        log "INFO" "Updating package lists..."
-        apt-get update || log "WARNING" "Failed to update package lists"
-    else
-        log "WARNING" "apt-get not found, skipping package operations"
         return 0
     fi
     
@@ -93,11 +97,10 @@ main() {
     done
     
     if [[ ${#failed_packages[@]} -gt 0 ]]; then
-        echo "Failed to install packages: ${failed_packages[*]}"
-        exit 1
+        error_exit "Failed to install packages: ${failed_packages[*]}"
     fi
     
-    log "INFO" "Dependency check completed"
+    log "INFO" "Dependency check completed successfully"
     return 0
 }
 
