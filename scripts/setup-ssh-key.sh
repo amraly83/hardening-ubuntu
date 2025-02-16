@@ -7,6 +7,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 LOG_FILE="/var/log/server-hardening.log"
 init_script
 
+# Clean input from any ANSI codes and log prefixes
+clean_input() {
+    echo "$1" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})?[mGK]//g" | \
+        sed -E 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //'
+}
+
 # Validate and get username
 validate_username_input() {
     local username="$1"
@@ -17,7 +23,7 @@ validate_username_input() {
 if [ -z "${1:-}" ]; then
     while true; do
         read -p "Enter username to setup SSH key for: " USERNAME
-        USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        USERNAME=$(clean_input "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
         if validate_username_input "$USERNAME"; then
             break
         else
@@ -25,7 +31,7 @@ if [ -z "${1:-}" ]; then
         fi
     done
 else
-    USERNAME=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+    USERNAME=$(clean_input "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
     if ! validate_username_input "$USERNAME"; then
         error_exit "Invalid username format: '$1' - must be lowercase, start with letter/underscore, 1-32 chars"
     fi
