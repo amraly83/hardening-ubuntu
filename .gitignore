@@ -1,0 +1,33 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Configuration Files
+*.conf
+hardening.conf*
+*.grub
+
+# Log Files
+*.log
+
+# Backup Files
+*.bak
+*~
+
+# Sensitive Data
+.google_authenticator
+authorized_keys
+known_hosts
+id_*
+*.pem
+*.key
+
+# Local Development
+.env
+.vscode/
+.idea/
+
+# Generated Documentation
+documentation/
+backups/
+/var/
