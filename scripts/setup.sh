@@ -57,23 +57,23 @@ check_prerequisites() {
 }
 
 setup_admin_user() {
-    echo -e "\n=== Step 1: Admin User Setup ==="
+    echo -e "\n=== Step 1: Admin User Setup ===" >&2
     local NEW_ADMIN_USER
     local max_attempts=3
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
-        read -r -p "Enter username for the new admin user: " NEW_ADMIN_USER
+        read -r -p "Enter username for the new admin user: " NEW_ADMIN_USER >&2
         
         # Check if username is empty
         if [[ -z "$NEW_ADMIN_USER" ]]; then
-            log "ERROR" "Username cannot be empty"
+            log "ERROR" "Username cannot be empty" >&2
             ((attempt++))
             continue
         fi
         
         # First validate the username format
-        if ! validate_username "$NEW_ADMIN_USER"; then
+        if ! validate_username "$NEW_ADMIN_USER" >&2; then
             ((attempt++))
             continue
         fi
@@ -81,26 +81,27 @@ setup_admin_user() {
         # Check if user exists
         if id "$NEW_ADMIN_USER" >/dev/null 2>&1; then
             if is_user_admin "$NEW_ADMIN_USER"; then
-                log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin"
-                if prompt_yes_no "Would you like to use this existing admin user" "yes"; then
-                    echo "$NEW_ADMIN_USER"
+                log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin" >&2
+                if prompt_yes_no "Would you like to use this existing admin user" "yes" >&2; then
+                    # Output just the username to stdout, everything else to stderr
+                    printf "%s" "$NEW_ADMIN_USER"
                     return 0
                 fi
             else
-                log "WARNING" "User '$NEW_ADMIN_USER' exists but is not an admin"
-                if prompt_yes_no "Would you like to grant admin privileges to this user" "no"; then
-                    log "INFO" "Adding '$NEW_ADMIN_USER' to sudo group"
+                log "WARNING" "User '$NEW_ADMIN_USER' exists but is not an admin" >&2
+                if prompt_yes_no "Would you like to grant admin privileges to this user" "no" >&2; then
+                    log "INFO" "Adding '$NEW_ADMIN_USER' to sudo group" >&2
                     if usermod -aG sudo "$NEW_ADMIN_USER"; then
                         # Verify sudo access after adding to group
                         if verify_sudo_access "$NEW_ADMIN_USER"; then
-                            log "INFO" "Sudo access granted and verified"
-                            echo "$NEW_ADMIN_USER"
+                            log "INFO" "Sudo access granted and verified" >&2
+                            printf "%s" "$NEW_ADMIN_USER"
                             return 0
                         else
-                            log "ERROR" "Failed to verify sudo access after granting privileges"
+                            log "ERROR" "Failed to verify sudo access after granting privileges" >&2
                         fi
                     else
-                        log "ERROR" "Failed to add user to sudo group"
+                        log "ERROR" "Failed to add user to sudo group" >&2
                     fi
                 fi
             fi
@@ -109,13 +110,13 @@ setup_admin_user() {
             if [[ $attempt -eq $max_attempts ]]; then
                 error_exit "Maximum attempts reached. Please resolve sudo access issues before proceeding"
             fi
-            echo "Please enter a different username"
+            echo "Please enter a different username" >&2
             ((attempt++))
             continue
             
         else
             # Create new user
-            log "INFO" "Creating new admin user: $NEW_ADMIN_USER"
+            log "INFO" "Creating new admin user: $NEW_ADMIN_USER" >&2
             if ! "${SCRIPT_DIR}/create-admin.sh" "$NEW_ADMIN_USER"; then
                 if [[ $attempt -eq $max_attempts ]]; then
                     error_exit "Failed to create admin user after $max_attempts attempts"
@@ -126,11 +127,11 @@ setup_admin_user() {
             
             # Verify sudo access for new user
             if verify_sudo_access "$NEW_ADMIN_USER"; then
-                log "INFO" "Sudo access verified for new user"
-                echo "$NEW_ADMIN_USER"
+                log "INFO" "Sudo access verified for new user" >&2
+                printf "%s" "$NEW_ADMIN_USER"
                 return 0
             else
-                log "ERROR" "Failed to verify sudo access for new user"
+                log "ERROR" "Failed to verify sudo access for new user" >&2
                 ((attempt++))
                 continue
             fi
@@ -212,15 +213,19 @@ main() {
     # Check prerequisites
     check_prerequisites
     
-    # Create admin user if needed
-    USERNAME=$(setup_admin_user)
+    # Create admin user if needed and store the clean username
+    # Redirect stdout to a temp file to separate it from log messages
+    USERNAME=$(setup_admin_user > >(tail -n1) 2>&1)
     
-    # Validate username directly after retrieving it
-    if [[ -z "$USERNAME" ]]; then
-        error_exit "Failed to get username"
+    # Clean the username of any log messages or whitespace
+    USERNAME=$(echo "$USERNAME" | tr -d '\n' | sed 's/.*\[INFO\].*//g' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    
+    # Validate username before proceeding
+    if [[ -z "$USERNAME" ]] || ! validate_username "$USERNAME"; then
+        error_exit "Failed to get valid username"
     fi
     
-    # Set up SSH keys
+    # Set up SSH keys with clean username
     setup_ssh_keys "$USERNAME"
     
     # Set up 2FA

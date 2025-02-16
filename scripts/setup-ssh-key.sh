@@ -28,25 +28,20 @@ validate_username_input() {
 
 # Get username with validation
 if [ -z "${1:-}" ]; then
-    while true; do
-        read -r -p "Enter username to setup SSH key for: " USERNAME
-        USERNAME=$(clean_input "$USERNAME")
-        if [ -z "$USERNAME" ]; then
-            log "ERROR" "Username cannot be empty"
-            continue
-        fi
-        if validate_username_input "$USERNAME"; then
-            break
-        fi
-    done
+    read -r -p "Enter username to setup SSH key for: " USERNAME
 else
-    USERNAME=$(clean_input "$1")
-    if [ -z "$USERNAME" ]; then
-        error_exit "Username cannot be empty"
-    fi
-    if ! validate_username_input "$USERNAME"; then
-        error_exit "Invalid username format: '$1'"
-    fi
+    USERNAME="${1}"
+fi
+
+# Clean and validate username
+USERNAME=$(echo "$USERNAME" | tr -d '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+if [ -z "$USERNAME" ]; then
+    error_exit "Username cannot be empty"
+fi
+
+if ! validate_username "$USERNAME"; then
+    error_exit "Invalid username: '$USERNAME'"
 fi
 
 # Check if user exists

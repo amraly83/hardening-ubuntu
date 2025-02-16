@@ -36,9 +36,9 @@ log() {
         "DEBUG") color="$COLOR_BLUE" ;;
     esac
     
-    # Print to console with color
+    # Print to console with color (redirect to stderr)
     echo -e "${color}[${timestamp}] [${level^^}] ${message}${COLOR_RESET}" | \
-        awk '{print substr($0, 1, 2000)}'  # Limit line length
+        awk '{print substr($0, 1, 2000)}' >&2
     
     # If LOG_FILE is defined, log to file without color codes
     if [[ -n "${LOG_FILE:-}" ]]; then
