@@ -1,25 +1,31 @@
 #!/bin/bash
 
-# Set strict mode and prepare environment
+# Set strict mode
 set -euo pipefail
 
-# Set log file first
+# Get absolute path of script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run script preloader first
+"${SCRIPT_DIR}/script-preloader.sh" || {
+    echo "Error: Failed to prepare scripts"
+    exit 1
+}
+
+# Set log file (before sourcing common.sh)
 LOG_FILE="/var/log/server-hardening.log"
 
-# Get absolute path of script directory and common.sh
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="${SCRIPT_DIR}/common.sh"
-PROGRESS_SH="${SCRIPT_DIR}/progress.sh"
-
-# Convert line endings if needed (in case edited on Windows)
-find "$SCRIPT_DIR" -name "*.sh" -type f -exec sed -i 's/\r$//' {} +
-
-# Source required scripts
-source "$COMMON_SH" || { echo "Error: Failed to source $COMMON_SH"; exit 1; }
-source "$PROGRESS_SH" || { echo "Error: Failed to source $PROGRESS_SH"; exit 1; }
+# Source common functions (now safe after preloader)
+source "${SCRIPT_DIR}/common.sh"
 
 # Initialize script
-init_script || { echo "Error: Failed to initialize script"; exit 1; }
+init_script
+
+# Source progress functions
+source "${SCRIPT_DIR}/progress.sh" || {
+    echo "Error: Failed to source ${SCRIPT_DIR}/progress.sh"
+    exit 1
+}
 
 check_prerequisites() {
     log "INFO" "Checking prerequisites..."

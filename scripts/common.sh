@@ -1,11 +1,15 @@
 #!/bin/bash
 
-# Set strict mode
+# Set strict mode and ensure proper line endings
 set -euo pipefail
 
 # Common functions library for hardening scripts
 # Source this file in other scripts using:
 # source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+# Initialize logging variables first
+declare LOG_FILE=${LOG_FILE:-""}
+declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Define color codes
 declare -r COLOR_RED='\033[0;31m'
@@ -14,23 +18,30 @@ declare -r COLOR_YELLOW='\033[1;33m'
 declare -r COLOR_BLUE='\033[0;34m'
 declare -r COLOR_RESET='\033[0m'
 
+# Function to fix line endings in a file
+fix_line_endings() {
+    local file="$1"
+    sed -i.bak 's/\r$//' "$file" && rm -f "${file}.bak"
+}
+
+# Fix line endings in this file first
+fix_line_endings "${BASH_SOURCE[0]}"
+
 log() {
     local level="$1"
     shift
     local message="$*"
-    local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date +'%Y-%m-%d %H:%M:%S')
     local color=""
     
-    # Validate log level
     if [[ ! "${level^^}" =~ ^(ERROR|WARNING|INFO|DEBUG|SUCCESS)$ ]]; then
         echo "[ERROR] Invalid log level: ${level}" >&2
         return 1
     fi
     
-    # Clean message of any special characters
     message=$(echo "$message" | tr -d '\000-\037')
     
-    # Set color based on log level
     case "${level^^}" in
         "ERROR") color="$COLOR_RED" ;;
         "WARNING") color="$COLOR_YELLOW" ;;
@@ -38,11 +49,9 @@ log() {
         "DEBUG") color="$COLOR_BLUE" ;;
     esac
     
-    # Print to console with color (redirect to stderr)
     echo -e "${color}[${timestamp}] [${level^^}] ${message}${COLOR_RESET}" | \
         awk '{print substr($0, 1, 2000)}' >&2
     
-    # If LOG_FILE is defined, log to file without color codes
     if [[ -n "${LOG_FILE:-}" ]]; then
         echo "[${timestamp}] [${level^^}] ${message}" | \
             awk '{print substr($0, 1, 2000)}' >> "$LOG_FILE"
@@ -51,7 +60,6 @@ log() {
 
 error_exit() {
     local message="$1"
-    # Ensure message is properly escaped
     message=$(echo "$message" | sed 's/"/\\"/g')
     log "ERROR" "$message"
     exit 1
@@ -70,20 +78,16 @@ is_user_admin() {
     local in_sudo=false
     local in_sudoers=false
     
-    # Check sudo/admin group membership
     if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
         in_sudo=true
     fi
     
-    # Check sudoers entries
     if [[ -f "/etc/sudoers.d/$username" ]] || \
        grep -q "^$username.*ALL=" /etc/sudoers 2>/dev/null; then
         in_sudoers=true
     fi
     
-    # Return true if either condition is met
     if [[ "$in_sudo" == "true" ]] || [[ "$in_sudoers" == "true" ]]; then
-        # Log the admin status source for debugging
         if [[ "$in_sudo" == "true" ]]; then
             log "DEBUG" "User $username is admin via group membership"
         fi
@@ -99,31 +103,25 @@ is_user_admin() {
 validate_username() {
     local username="$1"
     
-    # Trim whitespace
     username=$(echo "$username" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
-    # Debug logging
     log "DEBUG" "Validating username: '$username' (length: ${#username})"
     
-    # Check if username is empty after trimming
     if [[ -z "$username" ]]; then
         log "ERROR" "Username cannot be empty"
         return 1
     fi
     
-    # Check username length after trimming (3-32 chars)
     if [[ ${#username} -lt 3 || ${#username} -gt 32 ]]; then
         log "ERROR" "Username must be between 3 and 32 characters long (current length: ${#username})"
         return 1
     fi
     
-    # Check username format (starts with lowercase letter, followed by lowercase letters, numbers, or underscores)
     if [[ ! "$username" =~ ^[a-z][a-z0-9_-]*$ ]]; then
         log "ERROR" "Invalid username format. Must start with a letter and contain only lowercase letters, numbers, hyphens, or underscores"
         return 1
     fi
     
-    # Log successful validation
     log "DEBUG" "Username '$username' passed validation"
     return 0
 }
@@ -166,16 +164,14 @@ check_root() {
 check_ubuntu_version() {
     log "INFO" "Checking Ubuntu version..."
     
-    # First check if /etc/os-release exists
     if [[ ! -f "/etc/os-release" ]]; then
         log "WARNING" "Could not detect Ubuntu version - /etc/os-release not found"
         if ! prompt_yes_no "Continue without Ubuntu version check" "no"; then
             error_exit "This script requires Ubuntu Server"
         fi
         return 0
-    }
+    fi
     
-    # Check if it's Ubuntu
     if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
         log "WARNING" "This system does not appear to be running Ubuntu"
         if ! prompt_yes_no "Continue on non-Ubuntu system" "no"; then
@@ -184,7 +180,6 @@ check_ubuntu_version() {
         return 0
     fi
     
-    # Try to get version
     if ! command -v lsb_release >/dev/null 2>&1; then
         log "WARNING" "lsb_release not found, skipping version check"
         return 0
@@ -234,21 +229,17 @@ verify_sudo_access() {
     
     log "INFO" "Starting sudo access verification for $username..."
     
-    # First check if user exists
     if ! id "$username" >/dev/null 2>&1; then
         log "ERROR" "User $username does not exist"
         return 1
     fi
     
-    # Check if running as root
     if [[ $EUID -eq 0 ]]; then
-        # Check sudo group membership
         if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
             log "ERROR" "User $username is not in the sudo group"
             return 1
         fi
         
-        # Test sudo access directly
         if ! su - "$username" -c "sudo -n true" 2>/dev/null; then
             log "ERROR" "Failed to verify sudo access for $username"
             return 1
@@ -257,7 +248,6 @@ verify_sudo_access() {
         log "SUCCESS" "Sudo access verified for $username"
         return 0
     else
-        # If not root, try sudo directly
         if sudo -n true 2>/dev/null; then
             log "SUCCESS" "Sudo access verified for current user"
             return 0
@@ -279,12 +269,10 @@ verify_ssh_access() {
 # Verification functions
 test_2fa() {
     local username="$1"
-    # Check if google-authenticator is configured
     if [[ ! -f "/home/${username}/.google_authenticator" ]]; then
         log "ERROR" "2FA not configured for $username"
         return 1
     fi
-    # Verify PAM configuration
     if ! grep -q "auth required pam_google_authenticator.so" /etc/pam.d/sshd; then
         log "ERROR" "PAM not configured for 2FA"
         return 1
@@ -293,25 +281,21 @@ test_2fa() {
 }
 
 verify_hardening() {
-    # Check SSH configuration
     if ! sshd -t; then
         log "ERROR" "SSH configuration is invalid"
         return 1
     fi
     
-    # Check firewall status
     if ! ufw status | grep -q "Status: active"; then
         log "ERROR" "Firewall is not active"
         return 1
     fi
     
-    # Check fail2ban status
     if ! systemctl is-active --quiet fail2ban; then
         log "ERROR" "fail2ban is not running"
         return 1
     fi
     
-    # Verify system audit
     if ! systemctl is-active --quiet auditd; then
         log "ERROR" "audit system is not running"
         return 1
@@ -324,19 +308,16 @@ verify_all_configurations() {
     local username="$1"
     local all_passed=true
     
-    # Check user configuration
     if ! verify_sudo_access "$username"; then
         log "WARNING" "Sudo access verification failed"
         all_passed=false
     fi
     
-    # Check SSH configuration
     if ! check_ssh_key_setup "$username"; then
         log "WARNING" "SSH key verification failed"
         all_passed=false
     fi
     
-    # Check 2FA if enabled
     if [[ -f "/home/${username}/.google_authenticator" ]]; then
         if ! test_2fa "$username"; then
             log "WARNING" "2FA verification failed"
@@ -344,33 +325,25 @@ verify_all_configurations() {
         fi
     fi
     
-    # Check system hardening
     if ! verify_hardening; then
         log "WARNING" "System hardening verification failed"
         all_passed=false
     fi
     
-    # Return overall status
     [[ "$all_passed" == "true" ]]
 }
 
 # Script initialization
 init_script() {
-    # Set error handling
     set -euo pipefail
     
-    # Set script directory
     readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     
-    # Set secure umask for file creation
     umask 0027
     
-    # Check if running as root on Linux
     check_root
     
-    # Initialize logging
     if [[ -n "${LOG_FILE:-}" ]]; then
-        # Ensure log directory exists with proper permissions
         LOG_DIR=$(dirname "$LOG_FILE")
         if [[ ! -d "$LOG_DIR" ]]; then
             mkdir -p "$LOG_DIR"
@@ -381,7 +354,3 @@ init_script() {
         chmod 640 "$LOG_FILE"
     fi
 }
-
-# Initialize logging variables (before they're used)
-declare LOG_FILE=${LOG_FILE:-""}
-declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
