@@ -42,7 +42,7 @@ configure_ssh() {
     fi
     
     # Generate new SSH config
-    cat > "/etc/ssh/sshd_config" <<EOF
+    cat > "/etc/ssh/sshd_config" << 'EOF'
 # Security hardened sshd_config
 Port ${SSH_PORT}
 Protocol 2
@@ -112,7 +112,7 @@ configure_fail2ban() {
     backup_file "/etc/fail2ban/jail.local"
     
     # Create custom configuration
-    cat > "/etc/fail2ban/jail.local" <<EOF
+    cat > "/etc/fail2ban/jail.local" << 'EOF'
 [DEFAULT]
 bantime = 24h
 findtime = 48h
@@ -139,12 +139,12 @@ configure_automatic_updates() {
     backup_file "/etc/apt/apt.conf.d/50unattended-upgrades"
     
     # Configure unattended upgrades
-    cat > "/etc/apt/apt.conf.d/50unattended-upgrades" <<EOF
+    cat > "/etc/apt/apt.conf.d/50unattended-upgrades" << 'EOF'
 Unattended-Upgrade::Allowed-Origins {
-    "\${distro_id}:\${distro_codename}";
-    "\${distro_id}:\${distro_codename}-security";
-    "\${distro_id}ESMApps:\${distro_codename}-apps-security";
-    "\${distro_id}ESM:\${distro_codename}-infra-security";
+    "${distro_id}:${distro_codename}";
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
 };
 Unattended-Upgrade::Mail "${ADMIN_EMAIL}";
 Unattended-Upgrade::MailReport "on-change";
@@ -155,7 +155,7 @@ Unattended-Upgrade::Automatic-Reboot-Time "02:00";
 EOF
     
     # Enable automatic updates
-    cat > "/etc/apt/apt.conf.d/20auto-upgrades" <<EOF
+    cat > "/etc/apt/apt.conf.d/20auto-upgrades" << 'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::AutocleanInterval "7";
@@ -170,7 +170,7 @@ configure_sysctl() {
     backup_file "/etc/sysctl.conf"
     
     # Configure kernel parameters
-    cat > "/etc/sysctl.d/99-security.conf" <<EOF
+    cat > "/etc/sysctl.d/99-security.conf" << 'EOF'
 # Network security
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
@@ -199,7 +199,8 @@ kernel.randomize_va_space = 2
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.tcp_syncookies = 1
-EOF    
+EOF
+    
     # Apply changes
     sysctl -p /etc/sysctl.d/99-security.conf
 }
