@@ -33,11 +33,32 @@ check_user_exists() {
 
 is_user_admin() {
     local username="$1"
-    if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b' || \
-       [[ -f "/etc/sudoers.d/$username" ]] || \
+    local in_sudo=false
+    local in_sudoers=false
+    
+    # Check sudo/admin group membership
+    if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+        in_sudo=true
+    fi
+    
+    # Check sudoers entries
+    if [[ -f "/etc/sudoers.d/$username" ]] || \
        grep -q "^$username.*ALL=" /etc/sudoers 2>/dev/null; then
+        in_sudoers=true
+    fi
+    
+    # Return true if either condition is met
+    if [[ "$in_sudo" == "true" ]] || [[ "$in_sudoers" == "true" ]]; then
+        # Log the admin status source for debugging
+        if [[ "$in_sudo" == "true" ]]; then
+            log "DEBUG" "User $username is admin via group membership"
+        fi
+        if [[ "$in_sudoers" == "true" ]]; then
+            log "DEBUG" "User $username is admin via sudoers entry"
+        fi
         return 0
     fi
+    
     return 1
 }
 
@@ -129,10 +150,29 @@ prompt_yes_no() {
 # Verification
 verify_sudo_access() {
     local username="$1"
-    if ! su - "$username" -c "sudo -n true" 2>/dev/null; then
-        return 1
-    fi
-    return 0
+    local max_retries=3
+    local retry=0
+    local delay=2
+    
+    while [[ $retry -lt $max_retries ]]; do
+        # First check if user is in sudo group
+        if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+            log "WARNING" "User $username is not in the sudo group"
+            return 1
+        fi
+        
+        # Try sudo access with timeout to prevent hanging
+        if timeout 10s su - "$username" -c "sudo -n true" 2>/dev/null; then
+            return 0
+        fi
+        
+        log "WARNING" "Sudo access verification failed, attempt $((retry + 1))/$max_retries"
+        sleep $delay
+        ((retry++))
+        ((delay *= 2))
+    done
+    
+    return 1
 }
 
 verify_ssh_access() {

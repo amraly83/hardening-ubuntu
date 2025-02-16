@@ -77,29 +77,81 @@ setup_admin_user() {
             if is_user_admin "$NEW_ADMIN_USER"; then
                 log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin"
                 if prompt_yes_no "Would you like to use this existing admin user" "yes"; then
-                    break
-                else
-                    if [[ $attempt -eq $max_attempts ]]; then
-                        error_exit "Maximum attempts reached. Please start over with a different username"
+                    echo "Verifying sudo access for $NEW_ADMIN_USER..."
+                    # Try sudo access verification with exponential backoff
+                    local retry=0
+                    local max_retry=3
+                    local delay=2
+                    
+                    while [[ $retry -lt $max_retry ]]; do
+                        if verify_sudo_access "$NEW_ADMIN_USER"; then
+                            log "INFO" "Sudo access verified for $NEW_ADMIN_USER"
+                            echo
+                            echo "================================================================"
+                            echo "Using existing admin user: $NEW_ADMIN_USER"
+                            echo "Current configuration will be preserved"
+                            echo "You can reconfigure SSH keys and 2FA in the next steps"
+                            echo "================================================================"
+                            echo
+                            echo "$NEW_ADMIN_USER"
+                            return 0
+                        fi
+                        log "WARNING" "Sudo verification attempt $((retry + 1)) failed, retrying..."
+                        sleep $delay
+                        ((retry++))
+                        ((delay *= 2))
+                    done
+                    
+                    # If we get here, sudo verification failed
+                    log "WARNING" "Failed to verify sudo access for existing admin user"
+                    if prompt_yes_no "Would you like to try fixing sudo access" "yes"; then
+                        echo "Attempting to fix sudo access..."
+                        if ! groups "$NEW_ADMIN_USER" | grep -q sudo; then
+                            usermod -aG sudo "$NEW_ADMIN_USER"
+                        fi
+                        if verify_sudo_access "$NEW_ADMIN_USER"; then
+                            log "INFO" "Sudo access fixed and verified"
+                            echo
+                            echo "================================================================"
+                            echo "Sudo access has been fixed for: $NEW_ADMIN_USER"
+                            echo "Current configuration will be preserved"
+                            echo "You can reconfigure SSH keys and 2FA in the next steps"
+                            echo "================================================================"
+                            echo
+                            echo "$NEW_ADMIN_USER"
+                            return 0
+                        fi
                     fi
-                    echo "Please enter a different username"
-                    ((attempt++))
-                    continue
                 fi
+                if [[ $attempt -eq $max_attempts ]]; then
+                    error_exit "Maximum attempts reached. Please resolve sudo access issues before proceeding"
+                fi
+                echo "Please enter a different username"
+                ((attempt++))
+                continue
             else
                 log "WARNING" "User '$NEW_ADMIN_USER' exists but is not an admin"
                 if prompt_yes_no "Would you like to grant admin privileges to this user" "no"; then
                     log "INFO" "Adding '$NEW_ADMIN_USER' to sudo group"
-                    usermod -aG sudo "$NEW_ADMIN_USER" || error_exit "Failed to add user to sudo group"
-                    break
-                else
-                    if [[ $attempt -eq $max_attempts ]]; then
-                        error_exit "Maximum attempts reached. Please start over with a different username"
+                    if usermod -aG sudo "$NEW_ADMIN_USER"; then
+                        # Verify sudo access after adding to group
+                        if verify_sudo_access "$NEW_ADMIN_USER"; then
+                            log "INFO" "Sudo access granted and verified"
+                            echo "$NEW_ADMIN_USER"
+                            return 0
+                        else
+                            log "ERROR" "Failed to verify sudo access after granting privileges"
+                        fi
+                    else
+                        log "ERROR" "Failed to add user to sudo group"
                     fi
-                    echo "Please enter a different username"
-                    ((attempt++))
-                    continue
                 fi
+                if [[ $attempt -eq $max_attempts ]]; then
+                    error_exit "Maximum attempts reached. Please start over with a different username"
+                fi
+                echo "Please enter a different username"
+                ((attempt++))
+                continue
             fi
         else
             # Create new user
@@ -111,16 +163,21 @@ setup_admin_user() {
                 ((attempt++))
                 continue
             fi
-            break
+            
+            # Verify sudo access for new user
+            if verify_sudo_access "$NEW_ADMIN_USER"; then
+                log "INFO" "Sudo access verified for new user"
+                echo "$NEW_ADMIN_USER"
+                return 0
+            else
+                log "ERROR" "Failed to verify sudo access for new user"
+                ((attempt++))
+                continue
+            fi
         fi
     done
     
-    # Verify sudo access
-    if ! verify_sudo_access "$NEW_ADMIN_USER"; then
-        error_exit "Failed to verify sudo access for $NEW_ADMIN_USER"
-    fi
-    
-    echo "$NEW_ADMIN_USER"  # Return username for next steps
+    error_exit "Failed to set up admin user after $max_attempts attempts"
 }
 
 setup_ssh_keys() {

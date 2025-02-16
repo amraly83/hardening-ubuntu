@@ -51,6 +51,42 @@ Q: "User 'user1' exists but is not an admin. Would you like to grant admin privi
 - No: Prompts for a different username
 ```
 
+#### Using Existing Admin User
+**Problem**: Script stops after confirming existing admin user
+**Solutions**:
+1. Wait for sudo verification:
+   - The script performs up to 3 verification attempts
+   - Each attempt has a built-in delay to handle system load
+   - Total verification can take up to 30 seconds
+
+2. If sudo verification fails:
+   - Choose "yes" when prompted to fix sudo access
+   - The script will attempt to repair group membership
+   - A new verification cycle will start
+
+3. Common sudo verification failures:
+   - User not in sudo group despite admin status
+   - Stale group membership (needs session refresh)
+   - PAM configuration issues
+   - sudo configuration corruption
+
+**Verification Process**:
+```
+Step 1: Initial Check
+- Script checks if user exists
+- Verifies admin status (sudo group or sudoers entry)
+
+Step 2: Sudo Verification
+- Attempts non-interactive sudo command
+- Uses timeout to prevent hanging
+- Retries with exponential backoff
+
+Step 3: Auto-Recovery
+- Offers to fix common sudo issues
+- Re-adds user to sudo group if needed
+- Verifies fix was successful
+```
+
 #### Sudo Access Fails
 **Problem**: "Failed to verify sudo access"
 **Solution**:
