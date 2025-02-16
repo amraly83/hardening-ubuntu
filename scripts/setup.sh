@@ -1,10 +1,11 @@
 #!/bin/bash
+# Set log file first
+LOG_FILE="/var/log/server-setup.log"
 
 # Source common functions
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Initialize script
-LOG_FILE="/var/log/server-setup.log"
+# Initialize script after sourcing
 init_script
 
 check_prerequisites() {

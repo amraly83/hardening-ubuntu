@@ -2,6 +2,8 @@
 
 A comprehensive set of scripts for hardening Ubuntu Server security configurations.
 
+This repository contains scripts for hardening Ubuntu servers. The scripts can be developed and tested on Windows but are designed to run on Ubuntu Server.
+
 ## Features
 - Automated server hardening process
 - SSH key-based authentication setup
@@ -24,6 +26,35 @@ chmod +x scripts/*.sh
 # Run the automated setup
 sudo ./scripts/setup.sh
 ```
+
+## Development Setup
+
+If you're developing these scripts on Windows:
+
+1. Install Git for Windows with Git Bash
+2. Configure Git to handle line endings:
+   ```bash
+   git config --global core.autocrlf input
+   ```
+3. Use Git Bash to run and test scripts during development
+4. Install WSL (Windows Subsystem for Linux) for local testing
+
+## Deployment
+
+To deploy these scripts to your Ubuntu server:
+
+1. Run `prepare-deploy.sh` using Git Bash:
+   ```bash
+   ./prepare-deploy.sh
+   ```
+2. Copy the contents of the `deploy` directory to your Ubuntu server:
+   ```bash
+   scp -r deploy/* user@your-server:/path/to/destination/
+   ```
+3. On the Ubuntu server, verify permissions:
+   ```bash
+   chmod +x /path/to/destination/scripts/*.sh
+   ```
 
 ## Installation Tracking
 We provide a detailed checklist to help you track your progress through the installation:
@@ -89,6 +120,22 @@ See [GUIDE.md](docs/GUIDE.md) for detailed instructions and manual setup steps.
 - System backup and restore
 - Comprehensive logging
 - Documentation generation
+
+## Scripts Overview
+
+- `scripts/setup.sh`: Main setup script that guides through the hardening process
+- `scripts/common.sh`: Common functions used by all scripts
+- `scripts/create-admin.sh`: Creates and configures admin user
+- `scripts/setup-ssh-key.sh`: Configures SSH key authentication
+- `scripts/setup-2fa.sh`: Sets up two-factor authentication
+- `scripts/harden.sh`: Applies system hardening configurations
+
+## Testing
+
+Always test scripts in a safe environment first:
+1. Test locally using WSL
+2. Test on a development server
+3. Finally deploy to production
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
