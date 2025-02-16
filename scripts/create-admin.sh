@@ -15,16 +15,27 @@ get_valid_username() {
     
     while [[ $attempt -le $max_attempts ]]; do
         if [ -z "${1:-}" ]; then
-            read -p "Enter new admin username: " username
+            read -r -p "Enter new admin username: " username
         else
             username="$1"
         fi
         
-        # Validate username format
-        if ! validate_username "$username" 2>/dev/null; then
-            log "ERROR" "Invalid username format"
+        # Trim whitespace
+        username=$(echo "$username" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        
+        # Basic validation before calling validate_username
+        if [[ -z "$username" ]]; then
+            log "ERROR" "Username cannot be empty"
             if [ -n "${1:-}" ]; then
-                # If username was provided as argument, fail immediately
+                return 1
+            fi
+            ((attempt++))
+            continue
+        fi
+        
+        # Call validate_username without redirecting stderr
+        if ! validate_username "$username"; then
+            if [ -n "${1:-}" ]; then
                 return 1
             fi
             ((attempt++))

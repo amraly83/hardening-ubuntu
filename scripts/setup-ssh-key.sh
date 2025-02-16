@@ -10,24 +10,14 @@ init_script
 # Clean input from any ANSI codes and log prefixes
 clean_input() {
     local input="$1"
-
-    # Remove all ANSI escape sequences including colors, cursor movements, etc.
-    cleaned=$(echo "$input" | sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g')
-
-    # Remove log prefixes with more robust pattern matching
-    cleaned=$(echo "$cleaned" | sed -r 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO|WARNING|ERROR)\] //g')
-
-    # Remove any remaining non-alphanumeric characters from start/end
-    cleaned=$(echo "$cleaned" | sed -r 's/^[^a-zA-Z0-9_]+//;s/[^a-zA-Z0-9_]+$//g')
-
-    # Remove leading/trailing whitespace
-    cleaned=$(echo "$cleaned" | sed -r 's/^[[:space:]]+//;s/[[:space:]]+$//g')
-
-    # Debug logging
-    log "DEBUG" "Original input: $input"
-    log "DEBUG" "Cleaned input: $cleaned"
-
-    echo "$cleaned"
+    
+    # Trim whitespace first
+    input=$(echo "$input" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    
+    # Remove ANSI escape sequences
+    input=$(echo "$input" | sed -r "s/\x1B\[[0-9;]*[JKmsu]//g")
+    
+    echo "$input"
 }
 
 # Validate and get username
@@ -39,27 +29,23 @@ validate_username_input() {
 # Get username with validation
 if [ -z "${1:-}" ]; then
     while true; do
-        read -p "Enter username to setup SSH key for: " USERNAME
+        read -r -p "Enter username to setup SSH key for: " USERNAME
         USERNAME=$(clean_input "$USERNAME")
         if [ -z "$USERNAME" ]; then
-            log "ERROR" "Username cannot be empty after cleaning."
+            log "ERROR" "Username cannot be empty"
             continue
         fi
-        USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
         if validate_username_input "$USERNAME"; then
             break
-        else
-            log "ERROR" "Invalid username: $USERNAME. Must be lowercase, start with letter/underscore, 1-32 chars"
         fi
     done
 else
     USERNAME=$(clean_input "$1")
     if [ -z "$USERNAME" ]; then
-        error_exit "Username cannot be empty after cleaning."
+        error_exit "Username cannot be empty"
     fi
-    USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     if ! validate_username_input "$USERNAME"; then
-        error_exit "Invalid username format: '$1' - must be lowercase, start with letter/underscore, 1-32 chars"
+        error_exit "Invalid username format: '$1'"
     fi
 fi
 

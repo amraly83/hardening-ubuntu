@@ -63,12 +63,9 @@ setup_admin_user() {
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
-        read -p "Enter username for the new admin user: " NEW_ADMIN_USER
+        read -r -p "Enter username for the new admin user: " NEW_ADMIN_USER
         
-        # Remove ANSI escape sequences and whitespace, preserve valid username chars
-        NEW_ADMIN_USER=$(echo "$NEW_ADMIN_USER" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -d '\n' | tr -cd 'a-z0-9-_' | sed 's/^[^a-z]//')
-        
-        # Check if username is empty after cleaning
+        # Check if username is empty
         if [[ -z "$NEW_ADMIN_USER" ]]; then
             log "ERROR" "Username cannot be empty"
             ((attempt++))
@@ -76,8 +73,7 @@ setup_admin_user() {
         fi
         
         # First validate the username format
-        if ! validate_username "$NEW_ADMIN_USER" 2>/dev/null; then
-            log "ERROR" "Invalid username format"
+        if ! validate_username "$NEW_ADMIN_USER"; then
             ((attempt++))
             continue
         fi
@@ -87,16 +83,7 @@ setup_admin_user() {
             if is_user_admin "$NEW_ADMIN_USER"; then
                 log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin"
                 if prompt_yes_no "Would you like to use this existing admin user" "yes"; then
-                    # TEMPORARY: Skip sudo verification for debugging
-                    log "WARNING" "Temporarily skipping sudo verification for debugging"
-                    echo
-                    echo "================================================================"
-                    echo "Using existing admin user: $NEW_ADMIN_USER"
-                    echo "Current configuration will be preserved"
-                    echo "You can reconfigure SSH keys and 2FA in the next steps"
-                    echo "================================================================"
-                    echo
-                    printf "%s" "$NEW_ADMIN_USER"  # Use printf to avoid extra newlines
+                    echo "$NEW_ADMIN_USER"
                     return 0
                 fi
             else
@@ -225,15 +212,15 @@ main() {
     # Check prerequisites
     check_prerequisites
     
-    # Create admin user if needed and store the clean username
-    USERNAME=$(setup_admin_user | tr -d '\n')  # Remove any newlines from output
+    # Create admin user if needed
+    USERNAME=$(setup_admin_user)
     
-    # Validate username before proceeding
-    if [[ -z "$USERNAME" ]] || ! validate_username "$USERNAME" 2>/dev/null; then
-        error_exit "Failed to get valid username"
+    # Validate username directly after retrieving it
+    if [[ -z "$USERNAME" ]]; then
+        error_exit "Failed to get username"
     fi
     
-    # Set up SSH keys with clean username
+    # Set up SSH keys
     setup_ssh_keys "$USERNAME"
     
     # Set up 2FA

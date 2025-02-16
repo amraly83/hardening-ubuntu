@@ -97,29 +97,33 @@ is_user_admin() {
 validate_username() {
     local username="$1"
     
-    # Check if username is empty
+    # Trim whitespace
+    username=$(echo "$username" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    
+    # Debug logging
+    log "DEBUG" "Validating username: '$username' (length: ${#username})"
+    
+    # Check if username is empty after trimming
     if [[ -z "$username" ]]; then
-        error_exit "Username cannot be empty"
+        log "ERROR" "Username cannot be empty"
+        return 1
     fi
     
-    # Check username length (3-32 chars)
+    # Check username length after trimming (3-32 chars)
     if [[ ${#username} -lt 3 || ${#username} -gt 32 ]]; then
-        error_exit "Username must be between 3 and 32 characters long"
+        log "ERROR" "Username must be between 3 and 32 characters long (current length: ${#username})"
+        return 1
     fi
     
-    # Check username format (starts with lowercase letter, followed by lowercase letters, numbers, or hyphens)
+    # Check username format (starts with lowercase letter, followed by lowercase letters, numbers, or underscores)
     if [[ ! "$username" =~ ^[a-z][a-z0-9_-]*$ ]]; then
-        error_exit "Invalid username. Use only lowercase letters, numbers, hyphens, and underscores. Must start with a letter"
+        log "ERROR" "Invalid username format. Must start with a letter and contain only lowercase letters, numbers, hyphens, or underscores"
+        return 1
     fi
     
-    # Check against system usernames
-    local reserved_names=("root" "daemon" "bin" "sys" "sync" "games" "man" "lp" "mail" "news" "uucp" "proxy" "www-data" "backup" "list" "irc" "gnats" "nobody" "systemd-network" "systemd-resolve" "messagebus" "syslog" "_apt" "tss" "uuidd" "tcpdump" "avahi-autoipd" "usbmux" "dnsmasq" "kernoops" "avahi" "cups-pk-helper" "rtkit" "whoopsie" "sssd" "speech-dispatcher" "nm-openvpn" "saned" "colord" "geoclue" "pulse" "gnome-initial-setup" "hplip" "gdm" "lightdm" "sshd" "mysql" "postgresql" "mongodb" "redis" "rabbitmq" "elasticsearch")
-    
-    for reserved in "${reserved_names[@]}"; do
-        if [[ "$username" == "$reserved" ]]; then
-            error_exit "Username '$username' is reserved for system use"
-        fi
-    done
+    # Log successful validation
+    log "DEBUG" "Username '$username' passed validation"
+    return 0
 }
 
 # File Operations
