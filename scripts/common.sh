@@ -1,30 +1,29 @@
 #!/bin/bash
 
-# Set strict mode and ensure proper line endings
+# Set strict mode
 set -euo pipefail
 
-# Common functions library for hardening scripts
-# Source this file in other scripts using:
-# source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# Basic initialization first, before any function declarations
+readonly COLOR_RED='\033[0;31m'
+readonly COLOR_GREEN='\033[0;32m'
+readonly COLOR_YELLOW='\033[1;33m'
+readonly COLOR_BLUE='\033[0;34m'
+readonly COLOR_RESET='\033[0m'
 
-# Initialize logging variables first
+# Initialize logging variables
 declare LOG_FILE=${LOG_FILE:-""}
-declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Define color codes
-declare -r COLOR_RED='\033[0;31m'
-declare -r COLOR_GREEN='\033[0;32m'
-declare -r COLOR_YELLOW='\033[1;33m'
-declare -r COLOR_BLUE='\033[0;34m'
-declare -r COLOR_RESET='\033[0m'
+# Setup script directory early, make it readonly immediately
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 
-# Function to fix line endings in a file
+# Function declarations
 fix_line_endings() {
     local file="$1"
     sed -i.bak 's/\r$//' "$file" && rm -f "${file}.bak"
 }
 
-# Fix line endings in this file first
+# Fix line endings in this file immediately
 fix_line_endings "${BASH_SOURCE[0]}"
 
 log() {
@@ -335,15 +334,18 @@ verify_all_configurations() {
 
 # Script initialization
 init_script() {
+    # Set error handling
     set -euo pipefail
     
-    readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    
+    # Set secure umask for file creation
     umask 0027
     
+    # Check if running as root on Linux
     check_root
     
+    # Initialize logging
     if [[ -n "${LOG_FILE:-}" ]]; then
+        local LOG_DIR
         LOG_DIR=$(dirname "$LOG_FILE")
         if [[ ! -d "$LOG_DIR" ]]; then
             mkdir -p "$LOG_DIR"

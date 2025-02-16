@@ -3,27 +3,37 @@
 # Set strict mode
 set -euo pipefail
 
+# Set log file before anything else
+LOG_FILE="/var/log/server-hardening.log"
+
 # Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Run script preloader first
+# Fix line endings in script-preloader first
+sed -i 's/\r$//' "${SCRIPT_DIR}/script-preloader.sh"
+chmod +x "${SCRIPT_DIR}/script-preloader.sh"
+
+# Run script preloader
 "${SCRIPT_DIR}/script-preloader.sh" || {
     echo "Error: Failed to prepare scripts"
     exit 1
 }
 
-# Set log file (before sourcing common.sh)
-LOG_FILE="/var/log/server-hardening.log"
-
 # Source common functions (now safe after preloader)
-source "${SCRIPT_DIR}/common.sh"
+source "${SCRIPT_DIR}/common.sh" || {
+    echo "Error: Failed to source common.sh"
+    exit 1
+}
 
-# Initialize script
-init_script
+# Initialize script (after sourcing common.sh)
+init_script || {
+    echo "Error: Failed to initialize script"
+    exit 1
+}
 
-# Source progress functions
+# Source progress tracking functions
 source "${SCRIPT_DIR}/progress.sh" || {
-    echo "Error: Failed to source ${SCRIPT_DIR}/progress.sh"
+    echo "Error: Failed to source progress.sh"
     exit 1
 }
 

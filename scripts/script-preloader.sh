@@ -16,10 +16,9 @@ validate_script() {
         echo "Syntax error in $script"
         return 1
     fi
-    # Check for CRLF line endings
+    # Check for CRLF line endings and fix if needed
     if file "$script" | grep -q "CRLF"; then
         echo "Warning: CRLF line endings found in $script"
-        # Try to fix CRLF endings more aggressively
         tr -d '\r' < "$script" > "${script}.tmp" && mv "${script}.tmp" "$script"
         if file "$script" | grep -q "CRLF"; then
             echo "Error: Failed to fix CRLF line endings in $script"
@@ -38,10 +37,19 @@ fix_script_formatting() {
     
     echo "Processing: $(basename "$script")"
     
-    # Check dependencies first
+    # Special handling for common.sh - process it first but don't modify after initial processing
+    if [[ "$script" == *"common.sh" ]]; then
+        if [[ ! -n "${PROCESSED_FILES[${SCRIPT_DIR}/common.sh]:-}" ]]; then
+            # Only fix common.sh once, at the very start
+            validate_script "$script" || return 1
+            PROCESSED_FILES[$script]=1
+        fi
+        return 0
+    fi
+    
+    # For other scripts, process common.sh dependency first
     if grep -q "source.*common.sh" "$script"; then
-        # This script depends on common.sh, ensure it's processed first
-        if [[ "$script" != *"common.sh" ]] && [[ ! -n "${PROCESSED_FILES[${SCRIPT_DIR}/common.sh]:-}" ]]; then
+        if [[ ! -n "${PROCESSED_FILES[${SCRIPT_DIR}/common.sh]:-}" ]]; then
             fix_script_formatting "${SCRIPT_DIR}/common.sh" || {
                 echo "Error: Failed to process dependency common.sh for $script"
                 return 1
@@ -51,8 +59,6 @@ fix_script_formatting() {
     
     # Fix line endings
     sed -i.bak 's/\r$//' "$script"
-    
-    # Remove backup file if it exists
     rm -f "${script}.bak"
     
     # Make script executable
@@ -67,8 +73,9 @@ fix_script_formatting() {
     return 0
 }
 
-# Check required commands
-check_required_commands() {
+# Main script
+main() {
+    # Check required commands
     local missing=()
     local commands=("file" "tr" "sed" "grep" "bash")
     
@@ -81,21 +88,12 @@ check_required_commands() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "Error: Missing required commands: ${missing[*]}"
         echo "Please install the missing packages and try again"
-        return 1
-    fi
-    return 0
-}
-
-# Main script
-main() {
-    # Check required commands before proceeding
-    if ! check_required_commands; then
         exit 1
     fi
     
     echo "Preparing shell scripts..."
     
-    # Process common.sh first
+    # Process common.sh first and only once
     if ! fix_script_formatting "${SCRIPT_DIR}/common.sh"; then
         echo "Error: Failed to process common.sh"
         exit 1
