@@ -20,9 +20,6 @@ get_valid_username() {
             username="$1"
         fi
         
-        # Trim whitespace
-        username=$(echo "$username" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-        
         # Basic validation before calling validate_username
         if [[ -z "$username" ]]; then
             log "ERROR" "Username cannot be empty"
@@ -33,17 +30,16 @@ get_valid_username() {
             continue
         fi
         
-        # Call validate_username without redirecting stderr
-        if ! validate_username "$username"; then
-            if [ -n "${1:-}" ]; then
-                return 1
-            fi
-            ((attempt++))
-            continue
+        # Call validate_username
+        if validate_username "$username"; then
+            printf "%s" "$username"
+            return 0
         fi
         
-        echo "$username"
-        return 0
+        if [ -n "${1:-}" ]; then
+            return 1
+        fi
+        ((attempt++))
     done
     
     return 1
@@ -87,21 +83,38 @@ main() {
     
     # Handle existing user
     if id "$USERNAME" >/dev/null 2>&1; then
-        if ! handle_existing_user "$USERNAME"; then
+        if is_user_admin "$USERNAME"; then
+            log "INFO" "User '$USERNAME' already exists and is already an admin"
+            if prompt_yes_no "Would you like to use this existing admin user" "yes"; then
+                printf "%s" "$USERNAME"
+                return 0
+            fi
+            error_exit "Operation cancelled. Please try again with a different username"
+        else
+            log "WARNING" "User '$USERNAME' exists but is not an admin"
+            if prompt_yes_no "Would you like to grant admin privileges to this user" "no"; then
+                if usermod -aG sudo "$USERNAME"; then
+                    log "INFO" "Added '$USERNAME' to sudo group"
+                    printf "%s" "$USERNAME"
+                    return 0
+                else
+                    error_exit "Failed to add user to sudo group"
+                fi
+            fi
             error_exit "Operation cancelled. Please try again with a different username"
         fi
-    else
-        # Create new user
-        log "INFO" "Creating new admin user: $USERNAME"
-        if ! adduser --gecos "" "$USERNAME"; then
-            error_exit "Failed to create user '$USERNAME'"
-        fi
-        
-        # Add to sudo group
-        log "INFO" "Adding '$USERNAME' to sudo group"
-        if ! usermod -aG sudo "$USERNAME"; then
-            error_exit "Failed to add '$USERNAME' to sudo group"
-        fi
+    fi
+    
+    # Create new user
+    log "INFO" "Creating new admin user: $USERNAME"
+    if ! adduser --gecos "" "$USERNAME"; then
+        error_exit "Failed to create user '$USERNAME'"
+    fi
+    
+    # Add to sudo group
+    log "INFO" "Adding '$USERNAME' to sudo group"
+    if ! usermod -aG sudo "$USERNAME"; then
+        error_exit "Failed to add '$USERNAME' to sudo group"
     fi
     
     # Set up .ssh directory
@@ -113,20 +126,7 @@ main() {
     fi
     
     log "INFO" "Successfully configured admin user: $USERNAME"
-    echo "================================================================"
-    echo "Admin user $USERNAME has been configured"
-    echo
-    echo "Next steps:"
-    echo "1. Set up SSH keys for this user:"
-    echo "   ./setup-ssh-key.sh $USERNAME"
-    echo
-    echo "2. Test sudo access:"
-    echo "   su - $USERNAME"
-    echo "   sudo whoami  # Should output 'root'"
-    echo
-    echo "3. If using 2FA, set it up:"
-    echo "   ./setup-2fa.sh $USERNAME"
-    echo "================================================================"
+    printf "%s" "$USERNAME"
 }
 
 main "$@"

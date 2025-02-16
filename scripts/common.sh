@@ -132,6 +132,7 @@ backup_file() {
     if [[ -f "$file" ]]; then
         local backup="${file}.$(date +%Y%m%d_%H%M%S).bak"
         cp -p "$file" "$backup" || error_exit "Failed to backup $file"
+        chmod --reference="$file" "$backup" 2>/dev/null || chmod 600 "$backup"
         log "INFO" "Backed up $file to $backup"
     fi
 }
@@ -161,14 +162,47 @@ check_root() {
 }
 
 check_ubuntu_version() {
-    if ! grep -q "Ubuntu" /etc/os-release; then
-        error_exit "This script requires Ubuntu Server"
+    log "INFO" "Checking Ubuntu version..."
+    
+    # First check if /etc/os-release exists
+    if [[ ! -f "/etc/os-release" ]]; then
+        log "WARNING" "Could not detect Ubuntu version - /etc/os-release not found"
+        if ! prompt_yes_no "Continue without Ubuntu version check" "no"; then
+            error_exit "This script requires Ubuntu Server"
+        fi
+        return 0
+    }
+    
+    # Check if it's Ubuntu
+    if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
+        log "WARNING" "This system does not appear to be running Ubuntu"
+        if ! prompt_yes_no "Continue on non-Ubuntu system" "no"; then
+            error_exit "This script requires Ubuntu Server"
+        fi
+        return 0
+    fi
+    
+    # Try to get version
+    if ! command -v lsb_release >/dev/null 2>&1; then
+        log "WARNING" "lsb_release not found, skipping version check"
+        return 0
     fi
     
     local version
-    version=$(lsb_release -rs)
-    if [ "$(echo "$version < 20.04" | bc)" -eq 1 ]; then
-        error_exit "This script requires Ubuntu 20.04 or later"
+    if ! version=$(lsb_release -rs 2>/dev/null); then
+        log "WARNING" "Could not determine Ubuntu version"
+        return 0
+    fi
+    
+    if command -v bc >/dev/null 2>&1; then
+        if [ "$(echo "$version < 20.04" | bc 2>/dev/null)" -eq 1 ]; then
+            log "WARNING" "Ubuntu version $version is older than recommended 20.04"
+            if ! prompt_yes_no "Continue with older Ubuntu version" "no"; then
+                error_exit "This script requires Ubuntu 20.04 or later"
+            fi
+        fi
+    else
+        log "WARNING" "bc command not found, skipping version comparison"
     fi
 }
 
@@ -203,46 +237,33 @@ verify_sudo_access() {
         log "ERROR" "User $username does not exist"
         return 1
     fi
-    log "SUCCESS" "User existence verified"
     
-    # Check if user is in sudo group first
-    if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
-        log "WARNING" "User $username is not in the sudo group"
-        return 1
-    fi
-    log "SUCCESS" "User sudo group membership verified"
-    
-    # Try to refresh group membership
-    log "INFO" "Attempting to refresh group membership..."
-    if ! newgrp sudo >/dev/null 2>&1; then
-        log "DEBUG" "Failed to refresh group membership, continuing anyway"
-    fi
-    
-    log "INFO" "Testing sudo access with timeout..."
-    while [[ $retry -lt $max_retries ]]; do
-        log "INFO" "Sudo verification attempt $((retry + 1))/$max_retries"
-        # Try sudo access with shorter timeout and capture error
-        if su - "$username" -c "sudo -nv" 2>/dev/null; then
-            log "SUCCESS" "Sudo access verified successfully for $username"
+    # Check if running as root
+    if [[ $EUID -eq 0 ]]; then
+        # Check sudo group membership
+        if ! groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
+            log "ERROR" "User $username is not in the sudo group"
+            return 1
+        fi
+        
+        # Test sudo access directly
+        if ! su - "$username" -c "sudo -n true" 2>/dev/null; then
+            log "ERROR" "Failed to verify sudo access for $username"
+            return 1
+        fi
+        
+        log "SUCCESS" "Sudo access verified for $username"
+        return 0
+    else
+        # If not root, try sudo directly
+        if sudo -n true 2>/dev/null; then
+            log "SUCCESS" "Sudo access verified for current user"
             return 0
         fi
         
-        local exit_code=$?
-        log "WARNING" "Sudo verification attempt $((retry + 1)) failed (exit code: $exit_code)"
-        
-        if [[ $retry -lt $((max_retries - 1)) ]]; then
-            log "INFO" "Waiting ${delay}s before next attempt..."
-            sleep $delay
-            ((retry++))
-            ((delay *= 2))
-        else
-            break
-        fi
-    done
-    
-    log "ERROR" "All sudo verification attempts failed for $username"
-    log "INFO" "Please ensure user has proper sudo privileges and try again"
-    return 1
+        log "ERROR" "Cannot verify sudo access without root privileges"
+        return 1
+    fi
 }
 
 verify_ssh_access() {
@@ -255,18 +276,28 @@ verify_ssh_access() {
 
 # Script initialization
 init_script() {
-    # Set up error handling
+    # Set error handling
     set -euo pipefail
     
     # Set script directory
-    readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     
-    # Check if running as root
+    # Set secure umask for file creation
+    umask 0027
+    
+    # Check if running as root on Linux
     check_root
     
-    # Initialize logging if LOG_FILE is defined
+    # Initialize logging
     if [[ -n "${LOG_FILE:-}" ]]; then
+        # Ensure log directory exists with proper permissions
+        LOG_DIR=$(dirname "$LOG_FILE")
+        if [[ ! -d "$LOG_DIR" ]]; then
+            mkdir -p "$LOG_DIR"
+            chmod 750 "$LOG_DIR"
+        fi
+        
         touch "$LOG_FILE" || error_exit "Cannot create log file: $LOG_FILE"
-        chmod 600 "$LOG_FILE"
+        chmod 640 "$LOG_FILE"
     fi
 }

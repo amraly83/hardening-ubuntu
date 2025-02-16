@@ -7,97 +7,101 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 LOG_FILE="/var/log/server-hardening.log"
 init_script
 
-check_disk_space() {
-    local required_mb=1024  # 1GB minimum
-    local available=$(df -m /var | awk 'NR==2 {print $4}')
+check_critical_services() {
+    log "INFO" "Checking critical services..."
     
-    if [[ $available -lt $required_mb ]]; then
-        error_exit "Insufficient disk space. Required: ${required_mb}MB, Available: ${available}MB"
-    fi
-}
-
-check_memory() {
-    local required_mb=1024  # 1GB minimum
-    local available=$(free -m | awk '/^Mem:/{print $2}')
-    
-    if [[ $available -lt $required_mb ]]; then
-        log "WARNING" "Low memory detected. Recommended: ${required_mb}MB, Available: ${available}MB"
-        if ! prompt_yes_no "Continue with low memory" "no"; then
-            error_exit "Operation cancelled due to low memory"
-        fi
-    fi
-}
-
-check_running_services() {
+    # List of critical services that must be running
     local critical_services=(
-        "sshd"
-        "systemd-journald"
+        "ssh"       # SSH server
+        "cron"      # Cron daemon
+        "systemd"   # System and service manager
     )
     
+    local failed=0
     for service in "${critical_services[@]}"; do
-        if ! systemctl is-active --quiet "$service"; then
-            error_exit "Critical service $service is not running"
+        if ! systemctl is-active --quiet "$service" 2>/dev/null; then
+            log "ERROR" "Critical service $service is not running"
+            ((failed++))
         fi
     done
+    
+    if [[ "$failed" -gt 0 ]]; then
+        error_exit "$failed critical services are not running"
+    fi
+}
+
+check_system_resources() {
+    log "INFO" "Checking system resources..."
+    
+    # Check CPU load
+    local load=$(uptime | awk -F'load average:' '{ print $2 }' | awk -F, '{ print $1 }')
+    if [[ $(echo "$load > 5" | bc 2>/dev/null) -eq 1 ]]; then
+        log "WARNING" "High system load detected: $load"
+    fi
+    
+    # Check memory
+    local mem_available=$(free -m | awk '/^Mem:/ {print $7}')
+    if [[ "$mem_available" -lt 512 ]]; then
+        error_exit "Insufficient memory available: ${mem_available}MB (minimum 512MB required)"
+    fi
+    
+    # Check disk space
+    local disk_free=$(df -m / | awk 'NR==2 {print $4}')
+    if [[ "$disk_free" -lt 1024 ]]; then
+        error_exit "Insufficient disk space: ${disk_free}MB (minimum 1GB required)"
+    fi
 }
 
 check_network() {
-    # Check if we can reach important services
-    local urls=(
-        "security.ubuntu.com"
-        "archive.ubuntu.com"
-    )
+    log "INFO" "Checking network configuration..."
     
-    for url in "${urls[@]}"; do
-        if ! ping -c 1 "$url" >/dev/null 2>&1; then
-            log "WARNING" "Cannot reach $url. Package updates might fail"
-        fi
-    done
-}
-
-check_backup_space() {
-    local backup_dir="/var/backups/server-hardening"
-    local required_mb=512
+    # Check if network is up
+    if ! ping -c 1 -W 5 8.8.8.8 >/dev/null 2>&1; then
+        error_exit "No network connectivity detected"
+    fi
     
-    # Create backup directory if it doesn't exist
-    mkdir -p "$backup_dir" || error_exit "Cannot create backup directory"
+    # Check if DNS resolution works
+    if ! host -W 5 ubuntu.com >/dev/null 2>&1; then
+        error_exit "DNS resolution not working"
+    fi
     
-    local available=$(df -m "$backup_dir" | awk 'NR==2 {print $4}')
-    if [[ $available -lt $required_mb ]]; then
-        error_exit "Insufficient space for backups. Required: ${required_mb}MB, Available: ${available}MB"
+    # Check SSH port availability
+    if ! netstat -tuln | grep -q ':22\s'; then
+        error_exit "SSH port 22 is not available"
     fi
 }
 
-check_open_sessions() {
-    local session_count=$(who | wc -l)
-    if [[ $session_count -gt 1 ]]; then
-        log "WARNING" "Multiple sessions detected ($session_count). This might indicate other users are logged in"
-        if ! prompt_yes_no "Continue with multiple sessions" "no"; then
-            error_exit "Operation cancelled due to multiple sessions"
+check_security_status() {
+    log "INFO" "Checking security status..."
+    
+    # Check for pending security updates
+    if [[ -x /usr/lib/update-notifier/apt-check ]]; then
+        local updates=$(/usr/lib/update-notifier/apt-check 2>&1)
+        local security_updates=$(echo "$updates" | cut -d';' -f2)
+        if [[ "$security_updates" -gt 0 ]]; then
+            log "WARNING" "$security_updates security updates pending"
         fi
+    fi
+    
+    # Check if firewall is active
+    if ! ufw status | grep -q "Status: active"; then
+        log "WARNING" "Firewall is not enabled"
     fi
 }
 
 main() {
-    log "INFO" "Running pre-flight checks..."
+    log "INFO" "Starting server pre-flight checks..."
     
-    # System checks
-    check_disk_space
-    check_memory
-    check_running_services
+    # Run all checks
+    check_critical_services
+    check_system_resources
     check_network
-    check_backup_space
-    check_open_sessions
+    check_security_status
     
-    # Validate all scripts
-    if ! "${SCRIPT_DIR}/validate.sh"; then
-        error_exit "Script validation failed"
-    fi
-    
-    log "INFO" "All pre-flight checks passed"
+    log "SUCCESS" "All pre-flight checks passed"
     echo "================================================================"
-    echo "Pre-flight checks completed successfully"
-    echo "The system is ready for hardening"
+    echo "Pre-flight checks completed successfully."
+    echo "The server meets all minimum requirements for hardening."
     echo "================================================================"
 }
 

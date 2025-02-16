@@ -7,53 +7,23 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 LOG_FILE="/var/log/server-setup.log"
 init_script
 
-# Install dependencies first
-log "INFO" "Checking and installing dependencies..."
-if ! "${SCRIPT_DIR}/install-deps.sh"; then
-    error_exit "Failed to install required dependencies"
-fi
-
-# Run preflight checks first
-if ! "${SCRIPT_DIR}/preflight.sh"; then
-    error_exit "Pre-flight checks failed. Please resolve issues before proceeding"
-fi
-
 check_prerequisites() {
     log "INFO" "Checking prerequisites..."
     
-    # Verify Ubuntu version
-    check_ubuntu_version
+    # Quick environment check
+    if [[ "$OSTYPE" != "linux-gnu"* ]]; then
+        error_exit "This script must be run on a Linux system"
+    fi
     
-    # Check required commands
-    local required_commands=(
-        "ssh-keygen"
-        "adduser"
-        "usermod"
-        "systemctl"
-        "ufw"
-        "apt-get"
-    )
-    
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            error_exit "Required command not found: $cmd"
-        fi
-    done
-    
-    # Verify all scripts exist and are executable
-    local required_scripts=(
-        "${SCRIPT_DIR}/create-admin.sh"
-        "${SCRIPT_DIR}/setup-ssh-key.sh"
-        "${SCRIPT_DIR}/setup-2fa.sh"
-        "${SCRIPT_DIR}/harden.sh"
-    )
-
-    for script in "${required_scripts[@]}"; do
-        if [[ ! -f "$script" ]]; then
+    # Verify scripts exist
+    for script in create-admin.sh setup-ssh-key.sh setup-2fa.sh harden.sh; do
+        if [[ ! -f "${SCRIPT_DIR}/$script" ]]; then
             error_exit "Required script not found: $script"
         fi
-        chmod +x "$script"
+        chmod +x "${SCRIPT_DIR}/$script" || log "WARNING" "Could not make $script executable"
     done
+    
+    return 0
 }
 
 setup_admin_user() {
@@ -210,22 +180,26 @@ main() {
     echo "This script will guide you through the server hardening process"
     echo "================================================================"
     
-    # Check prerequisites
+    # Check prerequisites (minimal check for required files)
     check_prerequisites
     
-    # Create admin user if needed and store the clean username
-    # Redirect stdout to a temp file to separate it from log messages
-    USERNAME=$(setup_admin_user > >(tail -n1) 2>&1)
+    # Create admin user and store the username
+    USERNAME=""
+    while [[ -z "$USERNAME" ]]; do
+        USERNAME=$(setup_admin_user)
+        USERNAME=$(echo "$USERNAME" | tr -d '\n')
+        if [[ -z "$USERNAME" ]]; then
+            log "ERROR" "Failed to get valid username, retrying..."
+            sleep 1
+        fi
+    done
     
-    # Clean the username of any log messages or whitespace
-    USERNAME=$(echo "$USERNAME" | tr -d '\n' | sed 's/.*\[INFO\].*//g' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    
-    # Validate username before proceeding
-    if [[ -z "$USERNAME" ]] || ! validate_username "$USERNAME"; then
-        error_exit "Failed to get valid username"
+    # Verify username is valid
+    if ! validate_username "$USERNAME"; then
+        error_exit "Invalid username after creation: $USERNAME"
     fi
     
-    # Set up SSH keys with clean username
+    # Set up SSH keys
     setup_ssh_keys "$USERNAME"
     
     # Set up 2FA

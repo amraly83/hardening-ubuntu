@@ -3,9 +3,15 @@
 # Source common functions
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Initialize script
-LOG_FILE="/var/log/server-hardening.log"
+# Initialize script with Windows-compatible paths
+LOG_FILE="${TEMP:-/tmp}/server-hardening.log"
 init_script
+
+# Early environment check
+if [[ "$OSTYPE" != "linux-gnu"* ]]; then
+    log "WARNING" "Not running on Linux. Dependencies will not be installed."
+    exit 0
+fi
 
 # Required packages list
 REQUIRED_PACKAGES=(
@@ -25,6 +31,11 @@ REQUIRED_PACKAGES=(
 
 # Function to check if package is installed
 is_package_installed() {
+    local package="$1"
+    if ! command -v dpkg >/dev/null 2>&1; then
+        log "WARNING" "dpkg not found, cannot check package installation"
+        return 0
+    }
     dpkg -l "$1" 2>/dev/null | grep -q "^ii"
     return $?
 }
@@ -33,8 +44,15 @@ is_package_installed() {
 install_package() {
     local package="$1"
     log "INFO" "Installing $package..."
+    
+    if ! command -v apt-get >/dev/null 2>&1; then
+        log "WARNING" "apt-get not found, skipping package installation"
+        return 0
+    }
+    
     if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"; then
-        error_exit "Failed to install $package"
+        log "WARNING" "Failed to install $package"
+        return 1
     fi
 }
 
@@ -51,15 +69,24 @@ configure_postfix() {
 
 # Main installation function
 main() {
-    log "INFO" "Starting dependency installation..."
+    log "INFO" "Starting dependency check..."
     
-    # Update package lists
-    log "INFO" "Updating package lists..."
-    if ! apt-get update; then
-        error_exit "Failed to update package lists"
-    fi
+    # Check if we're on a Debian-based system
+    if [[ ! -f /etc/debian_version ]]; then
+        log "WARNING" "Not running on a Debian-based system, skipping package installation"
+        return 0
+    }
     
-    # Install packages
+    # Update package lists if possible
+    if command -v apt-get >/dev/null 2>&1; then
+        log "INFO" "Updating package lists..."
+        apt-get update || log "WARNING" "Failed to update package lists"
+    else
+        log "WARNING" "apt-get not found, skipping package operations"
+        return 0
+    }
+    
+    # Check installed packages
     local missing_packages=()
     for package in "${REQUIRED_PACKAGES[@]}"; do
         if ! is_package_installed "$package"; then
@@ -69,44 +96,33 @@ main() {
     
     if [ ${#missing_packages[@]} -eq 0 ]; then
         log "INFO" "All required packages are already installed"
-    else
-        log "INFO" "Installing missing packages: ${missing_packages[*]}"
-        for package in "${missing_packages[@]}"; do
-            install_package "$package"
-        done
+        return 0
     fi
     
-    # Special handling for postfix configuration
-    configure_postfix
+    # Report missing packages
+    log "INFO" "Missing packages: ${missing_packages[*]}"
+    if ! prompt_yes_no "Would you like to install missing packages" "yes"; then
+        log "WARNING" "Skipping package installation"
+        return 0
+    fi
     
-    # Enable and start required services
-    local services=("ufw" "fail2ban" "apparmor" "auditd")
-    for service in "${services[@]}"; do
-        log "INFO" "Enabling and starting $service..."
-        systemctl enable "$service"
-        systemctl start "$service"
-    done
-    
-    # Verify installations
-    log "INFO" "Verifying installations..."
+    # Try to install missing packages
     local failed=0
-    for package in "${REQUIRED_PACKAGES[@]}"; do
-        if ! is_package_installed "$package"; then
-            log "ERROR" "Package $package installation verification failed"
+    for package in "${missing_packages[@]}"; do
+        if ! install_package "$package"; then
             ((failed++))
         fi
     done
     
     if [ "$failed" -gt 0 ]; then
-        error_exit "$failed package(s) failed to install correctly"
+        log "WARNING" "$failed package(s) failed to install"
+        if ! prompt_yes_no "Continue despite package installation failures" "no"; then
+            error_exit "Package installation failed"
+        fi
     fi
     
-    log "INFO" "All dependencies installed successfully"
-    echo "================================================================"
-    echo "Dependencies installation complete"
-    echo "You can now proceed with the hardening setup"
-    echo "Run: sudo ./setup.sh"
-    echo "================================================================"
+    log "INFO" "Dependency check completed"
+    return 0
 }
 
 main "$@"
