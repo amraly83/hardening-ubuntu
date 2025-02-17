@@ -344,49 +344,44 @@ verify_step() {
 # Function to safely verify sudo access with auto-repair
 verify_admin_setup() {
     local username="$1"
-    # Clean any ANSI color codes and control characters
-    username=$(echo "$username" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -cd 'a-z0-9_-')
     
-    log "INFO" "Starting admin verification for $username"
+    # Clean username - only keep alphanumeric, dash and underscore
+    username=$(echo "$username" | tr -cd 'a-z0-9_-')
     
-    # Verify user exists
+    log "INFO" "Starting admin verification for user: $username"
+    
+    # Basic user existence check
     if ! id "$username" >/dev/null 2>&1; then
         log "ERROR" "User $username does not exist"
         return 1
     fi
     
-    # Step 1: Simple PAM configuration
-    log "DEBUG" "Setting up minimal PAM configuration..."
-    echo "auth sufficient pam_unix.so" > "/etc/pam.d/sudo"
-    chmod 644 "/etc/pam.d/sudo"
-    
-    # Step 2: Initialize sudo access using helper script
-    log "DEBUG" "Initializing sudo access..."
-    chmod +x "${SCRIPT_DIR}/init-sudo.sh"
-    if ! "${SCRIPT_DIR}/init-sudo.sh" "$username"; then
-        log "ERROR" "Failed to initialize sudo access"
-        return 1
-    fi
-    
-    # Step 3: Verify final state
-    log "DEBUG" "Verifying final configuration..."
+    # Verify sudo group membership
     if ! groups "$username" | grep -q '\bsudo\b'; then
-        log "ERROR" "User is not in sudo group after initialization"
-        return 1
+        log "WARNING" "User not in sudo group, attempting to fix..."
+        usermod -aG sudo "$username"
+        # Force group update
+        sg sudo -c "id" || true
     fi
     
-    if ! test -f "/etc/sudoers.d/$username"; then
-        log "ERROR" "Sudoers configuration missing after initialization"
-        return 1
+    # Ensure sudoers.d exists and has correct permissions
+    if [[ ! -d "/etc/sudoers.d" ]]; then
+        mkdir -p "/etc/sudoers.d"
+        chmod 750 "/etc/sudoers.d"
     fi
     
-    # Step 4: Final quick sudo test
+    # Set up clean sudoers entry
+    echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+    chmod 440 "/etc/sudoers.d/$username"
+    
+    # Verify sudo access
+    log "DEBUG" "Testing sudo access..."
     if ! timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
-        log "ERROR" "Final sudo verification failed"
+        log "ERROR" "Sudo verification failed"
         return 1
     fi
     
-    log "SUCCESS" "Admin user setup verified"
+    log "SUCCESS" "Admin user setup verified successfully"
     return 0
 }
 

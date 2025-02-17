@@ -1,7 +1,23 @@
 #!/bin/bash
-
 # Standalone verification script for system hardening
 set -euo pipefail
+
+# Fix line endings for this script first
+sed -i 's/\r$//' "${BASH_SOURCE[0]}"
+chmod +x "${BASH_SOURCE[0]}"
+
+# Get absolute path of script directory and fix common.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="${SCRIPT_DIR}/common.sh"
+
+# Fix and source common functions
+if [[ -f "$COMMON_SH" ]]; then
+    sed -i 's/\r$//' "$COMMON_SH"
+    source "$COMMON_SH"
+else
+    echo "Error: common.sh not found in $SCRIPT_DIR" >&2
+    exit 1
+fi
 
 # Initialize variables
 LOG_FILE="/var/log/server-hardening.log"
@@ -73,8 +89,12 @@ verify_user() {
     local username="$1"
     local status=0
     
-    # Clean and validate username
+    # Clean and validate username first
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    if [[ ! "$username" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+        log "ERROR" "Invalid username format: $username"
+        return 1
+    fi
     
     # Check user exists
     if ! id "$username" >/dev/null 2>&1; then
@@ -82,14 +102,29 @@ verify_user() {
         return 1
     fi
     
-    # Check sudo access
-    log "INFO" "Checking sudo access..."
-    if ! su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-        log "WARNING" "Sudo access check failed"
-        if ! groups "$username" | grep -q '\bsudo\b'; then
-            log "ERROR" "User is not in sudo group"
+    # Check sudo group membership
+    if ! groups "$username" | grep -q '\bsudo\b'; then
+        log "ERROR" "User is not in sudo group"
+        status=1
+    fi
+    
+    # Check sudoers entry
+    if [[ ! -f "/etc/sudoers.d/$username" ]]; then
+        log "ERROR" "No sudoers configuration found for user"
+        status=1
+    else
+        # Verify sudoers file permissions
+        local perms=$(stat -c "%a" "/etc/sudoers.d/$username" 2>/dev/null || echo "000")
+        if [[ "$perms" != "440" ]]; then
+            log "ERROR" "Incorrect permissions on sudoers file: $perms (should be 440)"
             status=1
         fi
+    fi
+    
+    # Verify sudo access
+    if ! timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
+        log "ERROR" "Failed to verify sudo access"
+        status=1
     else
         log "SUCCESS" "Sudo access verified"
     fi
@@ -159,6 +194,11 @@ verify_services() {
 
 # Main verification function
 main() {
+    if [[ $# -ne 1 ]]; then
+        log "ERROR" "Usage: $0 username"
+        exit 1
+    fi
+    
     local username="$1"
     local all_passed=0
     

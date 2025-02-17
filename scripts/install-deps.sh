@@ -1,107 +1,118 @@
 #!/bin/bash
-
-# Set strict mode
+# Install required dependencies for hardening scripts
 set -euo pipefail
 
-# Get script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Fix line endings for this script first
+sed -i 's/\r$//' "${BASH_SOURCE[0]}"
+chmod +x "${BASH_SOURCE[0]}"
 
-# Set log file before sourcing common.sh
-LOG_FILE="${TEMP:-/tmp}/server-hardening.log"
+# Colors for output
+readonly COLOR_GREEN='\033[1;32m'
+readonly COLOR_RED='\033[1;31m'
+readonly COLOR_YELLOW='\033[1;33m'
+readonly COLOR_BLUE='\033[1;34m'
+readonly COLOR_RESET='\033[0m'
 
-# Fix line endings in common.sh
-sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
-
-# Source common functions
-source "${SCRIPT_DIR}/common.sh" || {
-    echo "Error: Failed to source common.sh"
-    exit 1
-}
-
-# Initialize script
-init_script || {
-    echo "Error: Failed to initialize script"
-    exit 1
-}
-
-# Required packages list
-PACKAGES=(
-    "jq"              # For progress tracking JSON handling
-    "dos2unix"        # For line ending fixes
-    "openssh-server"  # For SSH configuration
-    "ufw"            # For firewall management
-    "fail2ban"       # For intrusion prevention
-    "auditd"         # For system auditing
-    "libpam-google-authenticator" # For 2FA
+# Required packages
+REQUIRED_PACKAGES=(
+    "sudo"
+    "openssh-server"
+    "ufw"
+    "fail2ban"
+    "unattended-upgrades"
+    "dos2unix"
+    "libpam-google-authenticator"
+    "jq"
+    "expect"
+    "timeout"
+    "file"
+    "bc"
+    "curl"
 )
 
 # Function to check if package is installed
 is_package_installed() {
-    dpkg -l "$1" &>/dev/null
+    dpkg -l "$1" 2>/dev/null | grep -q "^ii"
 }
 
-# Function to install missing packages
-install_missing_packages() {
-    local missing_packages=()
+# Function to install a package with progress
+install_package() {
+    local package="$1"
+    echo -n "Installing ${package}... "
     
-    log "INFO" "Checking required packages..."
-    for package in "${PACKAGES[@]}"; do
-        if ! is_package_installed "$package"; then
-            missing_packages+=("$package")
-        fi
-    done
-    
-    if [[ ${#missing_packages[@]} -gt 0 ]]; then
-        log "INFO" "Installing missing packages: ${missing_packages[*]}"
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" >/dev/null 2>&1; then
+        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
+        return 0
     else
-        log "INFO" "All required packages are already installed"
+        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
+        return 1
     fi
 }
 
 # Main installation function
 main() {
-    log "INFO" "Starting dependency check..."
-    
-    # Early environment check
-    if [[ "$OSTYPE" != "linux-gnu"* ]]; then
-        log "WARNING" "Not running on Linux. Dependencies will not be installed."
-        exit 0
-    fi
+    local failed=0
+    local installed=0
+    local skipped=0
     
     # Check if running as root
     if [[ $EUID -ne 0 ]]; then
-        error_exit "This script must be run as root"
+        echo -e "${COLOR_RED}Error: This script must be run as root${COLOR_RESET}"
+        exit 1
     fi
     
-    # Check if we're on a Debian-based system
-    if [[ ! -f /etc/debian_version ]]; then
-        log "WARNING" "Not running on a Debian-based system, skipping package installation"
-        return 0
+    # Check if running on Ubuntu
+    if ! grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
+        echo -e "${COLOR_YELLOW}Warning: This script is designed for Ubuntu${COLOR_RESET}"
+        echo "Continue anyway? [y/N] "
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
     
-    # Create required directories
-    mkdir -p /var/log/hardening
-    chmod 750 /var/log/hardening
+    echo -e "${COLOR_BLUE}=== Installing Required Dependencies ===${COLOR_RESET}"
+    
+    # Update package lists first
+    echo "Updating package lists..."
+    if ! apt-get update >/dev/null 2>&1; then
+        echo -e "${COLOR_RED}Failed to update package lists${COLOR_RESET}"
+        exit 1
+    fi
     
     # Install packages
-    install_missing_packages
-    
-    # Verify installations
-    local failed_packages=()
-    for package in "${PACKAGES[@]}"; do
-        if ! is_package_installed "$package"; then
-            failed_packages+=("$package")
+    for package in "${REQUIRED_PACKAGES[@]}"; do
+        if is_package_installed "$package"; then
+            echo -e "Package $package is ${COLOR_GREEN}already installed${COLOR_RESET}"
+            ((skipped++))
+            continue
+        fi
+        
+        if install_package "$package"; then
+            ((installed++))
+        else
+            ((failed++))
+            echo -e "${COLOR_RED}Failed to install $package${COLOR_RESET}"
         fi
     done
     
-    if [[ ${#failed_packages[@]} -gt 0 ]]; then
-        error_exit "Failed to install packages: ${failed_packages[*]}"
+    # Fix any potential dependency issues
+    echo "Fixing potential dependency issues..."
+    apt-get install -f -y >/dev/null 2>&1 || true
+    
+    # Print summary
+    echo -e "\n${COLOR_BLUE}=== Installation Summary ===${COLOR_RESET}"
+    echo -e "Packages installed: ${COLOR_GREEN}$installed${COLOR_RESET}"
+    echo -e "Packages skipped: ${COLOR_YELLOW}$skipped${COLOR_RESET}"
+    if [[ $failed -gt 0 ]]; then
+        echo -e "Packages failed: ${COLOR_RED}$failed${COLOR_RESET}"
+        echo -e "\n${COLOR_RED}Some packages failed to install. Please check the errors above.${COLOR_RESET}"
+        return 1
     fi
     
-    log "INFO" "Dependency check completed successfully"
+    echo -e "\n${COLOR_GREEN}All required dependencies installed successfully${COLOR_RESET}"
     return 0
 }
 
+# Run main function
 main "$@"

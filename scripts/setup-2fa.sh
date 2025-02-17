@@ -1,102 +1,180 @@
 #!/bin/bash
+# Setup 2FA (Google Authenticator) for a user
+set -euo pipefail
 
-# Source common functions
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# Fix line endings for this script first
+sed -i 's/\r$//' "${BASH_SOURCE[0]}"
+chmod +x "${BASH_SOURCE[0]}"
 
-# Initialize script
-LOG_FILE="/var/log/server-hardening.log"
-init_script
+# Get absolute path of script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Get username
-if [ -z "${1:-}" ]; then
-    read -p "Enter username to setup 2FA for: " USERNAME
-else
-    USERNAME="$1"
+# Source common functions after fixing line endings
+if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
+    sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
+    source "${SCRIPT_DIR}/common.sh"
 fi
 
-# Check if user exists
-check_user_exists "$USERNAME"
+# Colors for output
+readonly COLOR_GREEN='\033[1;32m'
+readonly COLOR_RED='\033[1;31m'
+readonly COLOR_YELLOW='\033[1;33m'
+readonly COLOR_CYAN='\033[1;36m'
+readonly COLOR_RESET='\033[0m'
 
-# Check SSH key setup first
-check_ssh_key_setup "$USERNAME"
-
-# Install required packages
-log "INFO" "Checking required packages..."
-if ! dpkg -l | grep -q "^ii.*libpam-google-authenticator"; then
-    log "INFO" "Installing libpam-google-authenticator..."
-    apt-get update || error_exit "Failed to update package list"
-    apt-get install -y libpam-google-authenticator || error_exit "Failed to install libpam-google-authenticator"
-fi
-
-# Backup PAM configuration
-backup_file "/etc/pam.d/sshd"
-
-# Configure PAM for SSH
-log "INFO" "Configuring PAM for SSH authentication..."
-if ! grep -q "^auth required pam_google_authenticator.so nullok" /etc/pam.d/sshd; then
-    sed -i '/^@include common-auth/i auth required pam_google_authenticator.so nullok' /etc/pam.d/sshd
-fi
-
-# Configure SSH to allow challenge-response
-log "INFO" "Configuring SSH settings..."
-backup_file "/etc/ssh/sshd_config"
-sed -i 's/^ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
-sed -i 's/^UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
-
-# Check for existing 2FA configuration
-if [[ -f "/home/$USERNAME/.google_authenticator" ]]; then
-    log "WARNING" "Existing 2FA configuration found"
-    if prompt_yes_no "Do you want to reset 2FA for this user" "no"; then
-        backup_file "/home/$USERNAME/.google_authenticator"
-    else
-        error_exit "Operation cancelled. Existing 2FA configuration retained"
+# Function to backup PAM configuration
+backup_pam_config() {
+    local file="/etc/pam.d/sshd"
+    local backup="${file}.$(date +%Y%m%d_%H%M%S).bak"
+    
+    if [[ -f "$file" ]]; then
+        cp -p "$file" "$backup" || return 1
+        chmod --reference="$file" "$backup" 2>/dev/null || chmod 644 "$backup"
     fi
-fi
+    return 0
+}
 
-# Generate 2FA for user
-log "INFO" "Generating 2FA configuration for $USERNAME..."
-if ! su - "$USERNAME" -c "google-authenticator -t -d -f -r 3 -R 30 -w 3"; then
-    error_exit "Failed to generate 2FA configuration"
-fi
+# Function to configure PAM for 2FA
+configure_pam_2fa() {
+    local pam_file="/etc/pam.d/sshd"
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Create new configuration
+    {
+        echo "#%PAM-1.0"
+        echo "auth required pam_google_authenticator.so"
+        echo "auth include common-auth"
+        echo "account include common-account"
+        echo "session include common-session"
+    } > "$temp_file"
+    
+    # Validate syntax
+    if ! pam-syntax-check "$temp_file" 2>/dev/null; then
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # Backup and install new configuration
+    backup_pam_config
+    mv "$temp_file" "$pam_file"
+    chmod 644 "$pam_file"
+    
+    return 0
+}
 
-# Verify file was created and set permissions
-if [[ ! -f "/home/$USERNAME/.google_authenticator" ]]; then
-    error_exit "2FA configuration file not created"
-fi
+# Function to configure SSH for 2FA
+configure_ssh_2fa() {
+    local sshd_config="/etc/ssh/sshd_config"
+    local temp_config
+    temp_config=$(mktemp)
+    
+    # Backup existing config
+    cp -p "$sshd_config" "${sshd_config}.$(date +%Y%m%d_%H%M%S).bak"
+    
+    # Update SSH configuration
+    sed '/^ChallengeResponseAuthentication/d; /^AuthenticationMethods/d' "$sshd_config" > "$temp_config"
+    {
+        echo "ChallengeResponseAuthentication yes"
+        echo "AuthenticationMethods publickey,keyboard-interactive"
+    } >> "$temp_config"
+    
+    # Validate configuration
+    if ! sshd -t -f "$temp_config" >/dev/null 2>&1; then
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    # Install new configuration
+    mv "$temp_config" "$sshd_config"
+    chmod 600 "$sshd_config"
+    
+    return 0
+}
 
-chown "$USERNAME:$USERNAME" "/home/$USERNAME/.google_authenticator"
-chmod 400 "/home/$USERNAME/.google_authenticator"
+# Function to set up Google Authenticator for a user
+setup_google_auth() {
+    local username="$1"
+    local ga_file="/home/${username}/.google_authenticator"
+    
+    # Generate configuration
+    if ! su -c "google-authenticator -t -d -f -r 3 -R 30 -w 3" - "$username"; then
+        return 1
+    fi
+    
+    # Verify file exists and has correct permissions
+    if [[ ! -f "$ga_file" ]]; then
+        return 1
+    fi
+    
+    chmod 400 "$ga_file"
+    chown "$username:$username" "$ga_file"
+    
+    return 0
+}
 
-# Restart SSH service
-log "INFO" "Restarting SSH service..."
-if ! systemctl restart sshd; then
-    error_exit "Failed to restart SSH service"
-fi
-
-# Test SSH configuration
-log "INFO" "Testing SSH configuration..."
-if ! sshd -t; then
-    log "ERROR" "SSH configuration test failed"
-    # Restore backups
-    cp -p "/etc/pam.d/sshd.$(date +%Y%m%d_)*.bak" /etc/pam.d/sshd 2>/dev/null
-    cp -p "/etc/ssh/sshd_config.$(date +%Y%m%d_)*.bak" /etc/ssh/sshd_config 2>/dev/null
+# Main function
+main() {
+    # Verify arguments
+    if [[ $# -ne 1 ]]; then
+        echo -e "${COLOR_RED}Usage: $0 username${COLOR_RESET}"
+        exit 1
+    fi
+    
+    local username="$1"
+    
+    # Clean username
+    username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    
+    # Check if user exists
+    if ! id "$username" >/dev/null 2>&1; then
+        echo -e "${COLOR_RED}Error: User $username does not exist${COLOR_RESET}"
+        exit 1
+    fi
+    
+    echo -e "${COLOR_CYAN}Setting up 2FA for user: $username${COLOR_RESET}"
+    
+    # Check if 2FA is already configured
+    if [[ -f "/home/${username}/.google_authenticator" ]]; then
+        echo -e "${COLOR_YELLOW}Warning: 2FA already configured for $username${COLOR_RESET}"
+        echo -n "Would you like to reconfigure? [y/N] "
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            exit 0
+        fi
+    fi
+    
+    # Configure PAM
+    echo "Configuring PAM for 2FA..."
+    if ! configure_pam_2fa; then
+        echo -e "${COLOR_RED}Failed to configure PAM${COLOR_RESET}"
+        exit 1
+    fi
+    
+    # Configure SSH
+    echo "Configuring SSH for 2FA..."
+    if ! configure_ssh_2fa; then
+        echo -e "${COLOR_RED}Failed to configure SSH${COLOR_RESET}"
+        exit 1
+    fi
+    
+    # Set up Google Authenticator
+    echo -e "\n${COLOR_CYAN}Setting up Google Authenticator...${COLOR_RESET}"
+    echo "Please follow the prompts to configure your 2FA device"
+    if ! setup_google_auth "$username"; then
+        echo -e "${COLOR_RED}Failed to set up Google Authenticator${COLOR_RESET}"
+        exit 1
+    fi
+    
+    # Restart SSH service
     systemctl restart sshd
-    error_exit "Configuration test failed, restored from backup"
-fi
+    
+    echo -e "\n${COLOR_GREEN}2FA setup completed successfully${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}Important: Test 2FA login in a new terminal before closing this session!${COLOR_RESET}"
+    echo "Command to test: ssh -o PreferredAuthentications=keyboard-interactive ${username}@localhost"
+    
+    return 0
+}
 
-echo "================================================================"
-echo "2FA has been set up for user: $USERNAME"
-echo
-echo "IMPORTANT STEPS:"
-echo "1. Save your backup codes in a secure location!"
-echo "2. Test 2FA login from a new terminal:"
-echo "   ssh -i ~/.ssh/id_ed25519 ${USERNAME}@hostname"
-echo
-echo "You should be prompted for:"
-echo "1. SSH key passphrase (if set)"
-echo "2. Google Authenticator code"
-echo
-echo "DO NOT log out of this session until you verify 2FA works!"
-echo "================================================================"
-
-log "INFO" "2FA setup completed successfully for $USERNAME"
+# Run main function
+main "$@"
