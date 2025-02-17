@@ -100,11 +100,22 @@ validate_ssh_key() {
 }
 
 configure_ssh_server() {
+    # Check if running on Windows
+    if [[ "$(uname -s)" == *"NT"* ]]; then
+        log "WARNING" "Running on Windows - skipping SSH server configuration"
+        return 0
+    }
+
     local sshd_config="/etc/ssh/sshd_config"
     local backup_suffix=".$(date +%Y%m%d_%H%M%S).bak"
 
     # Backup existing config
-    cp -p "$sshd_config" "${sshd_config}${backup_suffix}"
+    if [[ -f "$sshd_config" ]]; then
+        cp -p "$sshd_config" "${sshd_config}${backup_suffix}"
+    else
+        log "WARNING" "No sshd_config found at $sshd_config"
+        return 0
+    fi
 
     # Update SSH configuration
     cat > "$sshd_config" << 'EOF'
@@ -130,7 +141,6 @@ ClientAliveCountMax 0
 
 # Strict modes
 StrictModes yes
-UsePrivilegeSeparation sandbox
 
 # Key exchange and ciphers
 KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group14-sha256
@@ -148,14 +158,27 @@ AllowTcpForwarding no
 PermitTunnel no
 EOF
 
-    # Test configuration
-    if ! sshd -t; then
-        log "ERROR" "Invalid SSH configuration"
-        mv "${sshd_config}${backup_suffix}" "$sshd_config"
-        return 1
+    # Test configuration if sshd is available
+    if command -v sshd >/dev/null 2>&1; then
+        if ! sshd -t; then
+            log "ERROR" "Invalid SSH configuration"
+            mv "${sshd_config}${backup_suffix}" "$sshd_config"
+            return 1
+        fi
+
+        # Restart sshd if systemctl is available
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart sshd
+        elif command -v service >/dev/null 2>&1; then
+            service sshd restart
+        else
+            log "WARNING" "Could not restart sshd - manual restart may be required"
+        fi
+    else
+        log "WARNING" "sshd not found - skipping configuration test"
     fi
 
-    systemctl restart sshd
+    return 0
 }
 
 verify_ssh_access() {
