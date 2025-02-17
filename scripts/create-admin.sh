@@ -19,29 +19,38 @@ source "$COMMON_SH" || { echo "Error: Failed to source $COMMON_SH"; exit 1; }
 # Initialize script (after sourcing common.sh)
 init_script || { echo "Error: Failed to initialize script"; exit 1; }
 
-# Function to initialize sudo access
-initialize_sudo_access() {
+setup_sudo_access() {
     local username="$1"
-    log "INFO" "Initializing sudo access for $username"
     
-    # Create sudoers.d entry
-    local sudoers_file="/etc/sudoers.d/$username"
-    if [[ ! -f "$sudoers_file" ]]; then
-        echo "$username ALL=(ALL) NOPASSWD: /usr/bin/sudo" > "$sudoers_file"
-        chmod 440 "$sudoers_file"
+    # Ensure sudo group exists
+    if ! getent group sudo >/dev/null 2>&1; then
+        groupadd sudo
     fi
     
     # Add to sudo group
+    log "INFO" "Adding '$username' to sudo group"
     usermod -aG sudo "$username"
     
-    # Force group update
-    pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+    # Create initial sudo configuration
+    mkdir -p /etc/sudoers.d
+    chmod 750 /etc/sudoers.d
     
-    # Wait for group membership to propagate
-    sleep 2
+    # Set up initial NOPASSWD access
+    log "DEBUG" "Setting up initial sudo access"
+    echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
+    chmod 440 "/etc/sudoers.d/$username"
     
-    # Initialize sudo timestamp
-    su - "$username" -c "sudo -v" >/dev/null 2>&1 || true
+    # Quick verification
+    if timeout 5 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+        # Switch to password-required configuration
+        echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+        chmod 440 "/etc/sudoers.d/$username"
+        log "SUCCESS" "Sudo access configured successfully"
+        return 0
+    fi
+    
+    log "ERROR" "Failed to verify sudo access"
+    return 1
 }
 
 # Get username with retry logic
@@ -148,14 +157,10 @@ main() {
         error_exit "Failed to create user '$USERNAME'"
     fi
     
-    # Add to sudo group
-    log "INFO" "Adding '$USERNAME' to sudo group"
-    if ! usermod -aG sudo "$USERNAME"; then
-        error_exit "Failed to add '$USERNAME' to sudo group"
+    # Add to sudo group and configure sudo access
+    if ! setup_sudo_access "$USERNAME"; then
+        error_exit "Failed to configure sudo access"
     fi
-    
-    # Initialize sudo access
-    initialize_sudo_access "$USERNAME"
     
     # Set up .ssh directory
     SSH_DIR="/home/${USERNAME}/.ssh"

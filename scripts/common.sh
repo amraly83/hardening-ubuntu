@@ -237,54 +237,44 @@ verify_sudo_access() {
         return 1
     fi
     
-    # Initialize sudo environment
-    initialize_sudo_env "$username" || log "WARNING" "Failed to initialize sudo environment"
+    # Ensure clean environment
+    sudo -K || true
+    rm -f /run/sudo/ts/* 2>/dev/null || true
     
-    # Step 1: Ensure sudo group membership
+    # Basic setup first
+    log "DEBUG" "Setting up sudo configuration..."
     if ! groups "$username" | grep -q '\bsudo\b'; then
-        log "DEBUG" "Adding user to sudo group"
         usermod -aG sudo "$username"
-        # Force group update
-        su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
     fi
     
-    # Step 2: Create NOPASSWD sudo entry for initial setup
-    local sudoers_file="/etc/sudoers.d/$username"
-    echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
-    chmod 440 "$sudoers_file"
+    # Create initial NOPASSWD configuration
+    log "DEBUG" "Creating initial sudo access..."
+    mkdir -p /etc/sudoers.d
+    chmod 750 /etc/sudoers.d
+    echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
+    chmod 440 "/etc/sudoers.d/$username"
     
-    # Step 3: Test sudo access with retries
+    # Simple verification loop
     while [[ $retry -lt $max_retries ]]; do
-        log "DEBUG" "Testing sudo access (attempt $((retry + 1))/$max_retries)"
+        log "DEBUG" "Verifying sudo access (attempt $((retry + 1))/$max_retries)"
         
-        # Test with -n flag
-        if timeout 5 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+        # Direct sudo test with timeout
+        if timeout 5 su -s /bin/bash - "$username" -c "sudo -n id" >/dev/null 2>&1; then
             log "SUCCESS" "Sudo access verified"
             # Switch to password-required configuration
-            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
-            chmod 440 "$sudoers_file"
+            echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+            chmod 440 "/etc/sudoers.d/$username"
             return 0
-        fi
-        
-        # Only try fixes on first retry
-        if [[ $retry -eq 0 ]]; then
-            log "DEBUG" "First attempt failed, applying fixes"
-            # Reset sudo timestamp
-            sudo -K -u "$username" 2>/dev/null || true
-            # Ensure group membership again
-            usermod -aG sudo "$username"
-            # Force group update
-            su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
         fi
         
         ((retry++))
         if [[ $retry -lt $max_retries ]]; then
-            sleep "$delay"
-            delay=$((delay * 2))
+            log "DEBUG" "Waiting before retry..."
+            sleep 2
         fi
     done
     
-    log "ERROR" "Failed to verify sudo access after $max_retries attempts"
+    log "ERROR" "Failed to verify sudo access"
     return 1
 }
 
@@ -535,6 +525,34 @@ EOF
     rm -f /run/sudo/ts/* 2>/dev/null || true
     
     return 0
+}
+
+init_admin_access() {
+    local username="$1"
+    
+    # First initialize minimal PAM config
+    log "DEBUG" "Setting up minimal PAM configuration..."
+    chmod +x "${SCRIPT_DIR}/init-pam.sh"
+    if ! "${SCRIPT_DIR}/init-pam.sh"; then
+        log "WARNING" "PAM initialization failed, continuing anyway..."
+    fi
+    
+    # Then initialize sudo access
+    log "DEBUG" "Initializing sudo access..."
+    chmod +x "${SCRIPT_DIR}/init-sudo-access.sh"
+    if ! "${SCRIPT_DIR}/init-sudo-access.sh" "$username"; then
+        log "ERROR" "Failed to initialize sudo access"
+        return 1
+    fi
+    
+    # Quick verification
+    if timeout 5 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+        log "SUCCESS" "Admin access initialized successfully"
+        return 0
+    fi
+    
+    log "ERROR" "Admin access verification failed"
+    return 1
 }
 
 # Script initialization

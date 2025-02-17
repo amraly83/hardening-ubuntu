@@ -159,35 +159,21 @@ setup_admin_user() {
             # Create new user
             log "INFO" "Creating new admin user: $NEW_ADMIN_USER" >&2
             if ! "${SCRIPT_DIR}/create-admin.sh" "$NEW_ADMIN_USER"; then
-                if [[ $attempt -eq $max_attempts ]]; then
-                    error_exit "Failed to create admin user after $max_attempts attempts"
-                fi
-                ((attempt++))
-                continue
+                log "ERROR" "Failed to create admin user"
+                return 1
             fi
             
-            # Pre-initialize sudo access for new user
-            if [[ $EUID -eq 0 ]]; then
-                log "DEBUG" "Pre-initializing sudo access for new user..." >&2
-                # Ensure sudo group membership
-                usermod -aG sudo "$NEW_ADMIN_USER"
-                # Create sudoers entry
-                echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
-                chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
-                # Wait for changes to take effect
-                sleep 2
-            fi
-            
-            # Verify sudo access for new user
-            if verify_sudo_access "$NEW_ADMIN_USER"; then
-                log "INFO" "Sudo access verified for new user" >&2
+            # Initialize sudo access using dedicated script
+            log "DEBUG" "Initializing sudo access..."
+            chmod +x "${SCRIPT_DIR}/init-sudo-access.sh"
+            if "${SCRIPT_DIR}/init-sudo-access.sh" "$NEW_ADMIN_USER"; then
+                log "SUCCESS" "Sudo access initialized"
                 printf "%s" "$NEW_ADMIN_USER"
                 return 0
-            else
-                log "ERROR" "Failed to verify sudo access for new user" >&2
-                ((attempt++))
-                continue
             fi
+            
+            log "ERROR" "Failed to initialize sudo access"
+            return 1
         fi
     done
     
