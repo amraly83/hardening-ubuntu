@@ -232,9 +232,39 @@ setup_2fa() {
 
 run_hardening() {
     echo "=== Step 4: System Hardening ==="
-    echo "Please review the following settings before proceeding:"
-    echo "- SSH_PORT=\"3333\""
-    echo "- FIREWALL_ADDITIONAL_PORTS=\"80,443,3306,465,587,993,995\""
+    local config_file="/etc/server-hardening/hardening.conf"
+
+    if [[ ! -f "$config_file" ]]; then
+        echo "Preparing default configuration..."
+        mkdir -p "/etc/server-hardening"
+        cp "${SCRIPT_DIR}/../examples/config/hardening.conf.example" "$config_file" || {
+            error_exit "Failed to create initial configuration"
+        }
+        chmod 600 "$config_file"
+    fi
+
+    echo "Current hardening configuration:"
+    echo "----------------------------------------------------------------"
+    cat "$config_file"
+    echo "----------------------------------------------------------------"
+    echo "You can:"
+    echo "1. Continue with these settings"
+    echo "2. Edit the configuration now"
+    
+    if prompt_yes_no "Would you like to edit the configuration before proceeding" "yes"; then
+        if command -v nano >/dev/null 2>&1; then
+            nano "$config_file"
+        elif command -v vi >/dev/null 2>&1; then
+            vi "$config_file"
+        else
+            error_exit "No text editor (nano/vi) found to edit configuration"
+        fi
+        
+        echo "Configuration updated. Please review:"
+        echo "----------------------------------------------------------------"
+        cat "$config_file"
+        echo "----------------------------------------------------------------"
+    fi
     
     if prompt_yes_no "Would you like to proceed with system hardening" "no"; then
         log "INFO" "Starting system hardening..."

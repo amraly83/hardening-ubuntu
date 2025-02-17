@@ -234,13 +234,51 @@ main() {
     # Create necessary directories
     mkdir -p "/etc/server-hardening"
     
-    # Copy example config if no config exists
+    # Set default config path
+    CONFIG_FILE="${CONFIG_FILE:-/etc/server-hardening/hardening.conf}"
+    
+    # If no config exists, copy example and prompt for review
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        cp "$(dirname "${BASH_SOURCE[0]}")/../examples/config/hardening.conf.example" "$CONFIG_FILE"
-        log "WARNING" "No configuration file found. Copied example to $CONFIG_FILE"
-        log "INFO" "Please review and edit $CONFIG_FILE before running this script again"
-        exit 1
+        local example_config="$(dirname "${BASH_SOURCE[0]}")/../examples/config/hardening.conf.example"
+        if [[ ! -f "$example_config" ]]; then
+            error_exit "Example configuration file not found: $example_config"
+        fi
+        
+        # Copy example config
+        cp "$example_config" "$CONFIG_FILE" || error_exit "Failed to copy example config"
+        chmod 600 "$CONFIG_FILE"
+        
+        # Show configuration and prompt for review
+        echo "================================================================"
+        echo "No configuration file found. Default configuration:"
+        echo "----------------------------------------------------------------"
+        cat "$CONFIG_FILE"
+        echo "----------------------------------------------------------------"
+        echo "Please review the configuration above."
+        echo "You can:"
+        echo "1. Continue with these default settings"
+        echo "2. Exit, edit $CONFIG_FILE, and run again"
+        echo "================================================================"
+        
+        if ! prompt_yes_no "Would you like to continue with default settings" "no"; then
+            log "INFO" "Please edit $CONFIG_FILE and run this script again"
+            exit 0
+        fi
+        
+        log "INFO" "Proceeding with default configuration"
     fi
+    
+    # Source configuration file
+    log "INFO" "Loading configuration from $CONFIG_FILE"
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE" || error_exit "Failed to load configuration"
+    
+    # Validate required settings
+    for var in SSH_PORT SSH_ALLOW_USERS FIREWALL_ADDITIONAL_PORTS; do
+        if [[ -z "${!var}" ]]; then
+            error_exit "Required configuration variable $var is not set in $CONFIG_FILE"
+        fi
+    done
     
     # Perform hardening
     configure_ssh
