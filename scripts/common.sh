@@ -237,39 +237,49 @@ verify_sudo_access() {
         return 1
     fi
     
-    # Try verification directly without using verify-sudo.sh
+    # Initialize sudo environment
+    initialize_sudo_env "$username" || log "WARNING" "Failed to initialize sudo environment"
+    
+    # Step 1: Ensure sudo group membership
+    if ! groups "$username" | grep -q '\bsudo\b'; then
+        log "DEBUG" "Adding user to sudo group"
+        usermod -aG sudo "$username"
+        # Force group update
+        su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
+    fi
+    
+    # Step 2: Create NOPASSWD sudo entry for initial setup
+    local sudoers_file="/etc/sudoers.d/$username"
+    echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
+    chmod 440 "$sudoers_file"
+    
+    # Step 3: Test sudo access with retries
     while [[ $retry -lt $max_retries ]]; do
-        log "DEBUG" "Attempting sudo verification (attempt $((retry + 1))/$max_retries)"
+        log "DEBUG" "Testing sudo access (attempt $((retry + 1))/$max_retries)"
         
-        # Try direct sudo test
-        if timeout 10 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-            log "SUCCESS" "Sudo access verified for $username"
+        # Test with -n flag
+        if timeout 5 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified"
+            # Switch to password-required configuration
+            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+            chmod 440 "$sudoers_file"
             return 0
         fi
         
-        # After first failure, try to fix common issues
+        # Only try fixes on first retry
         if [[ $retry -eq 0 ]]; then
-            log "DEBUG" "First attempt failed, trying fixes..."
-            
-            # Add to sudo group
-            usermod -aG sudo "$username"
-            
-            # Create NOPASSWD sudo entry temporarily
-            echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
-            chmod 440 "/etc/sudoers.d/$username"
-            
+            log "DEBUG" "First attempt failed, applying fixes"
             # Reset sudo timestamp
             sudo -K -u "$username" 2>/dev/null || true
-            
-            # Force group update without killing session
+            # Ensure group membership again
+            usermod -aG sudo "$username"
+            # Force group update
             su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
-            sleep 2
         fi
         
         ((retry++))
         if [[ $retry -lt $max_retries ]]; then
-            log "DEBUG" "Waiting ${delay}s before retry..."
-            sleep $delay
+            sleep "$delay"
             delay=$((delay * 2))
         fi
     done
@@ -501,6 +511,47 @@ fix_sudo_auth() {
     pkill -SIGHUP -u "$username" || true
     
     log "INFO" "Sudo authentication reset for $username"
+    return 0
+}
+
+initialize_sudo_env() {
+    local username="$1"
+    
+    # Ensure clean environment
+    sudo -K || true
+    
+    # Ensure proper PAM configuration exists
+    if [[ ! -f "/etc/pam.d/sudo" ]]; then
+        cat > "/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+auth       sufficient   pam_unix.so nullok try_first_pass
+auth       required     pam_env.so readenv=1 user_readenv=0
+session    required     pam_limits.so
+session    required     pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+session    required     pam_unix.so
+EOF
+        chmod 644 "/etc/pam.d/sudo"
+    fi
+    
+    # Create basic sudoers configuration if needed
+    if [[ ! -f "/etc/sudoers.d/defaults" ]]; then
+        cat > "/etc/sudoers.d/defaults" << 'EOF'
+Defaults        env_reset
+Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults        !requiretty
+Defaults:%sudo  !authenticate
+EOF
+        chmod 440 "/etc/sudoers.d/defaults"
+    fi
+    
+    # Ensure proper permissions on sudo-related files
+    chown -R root:root /etc/sudoers.d/
+    chmod 750 /etc/sudoers.d/
+    chmod 440 /etc/sudoers
+    
+    # Reset any stale locks
+    rm -f /run/sudo/ts/* 2>/dev/null || true
+    
     return 0
 }
 

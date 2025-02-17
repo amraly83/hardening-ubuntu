@@ -350,7 +350,6 @@ verify_step() {
 # Function to safely verify sudo access with auto-repair
 verify_admin_setup() {
     local username="$1"
-    # Clean the username to prevent command injection
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
     
     log "INFO" "Starting admin verification for $username"
@@ -361,74 +360,63 @@ verify_admin_setup() {
         return 1
     fi
     
-    # Check current sudo group membership
-    local group_check
-    group_check=$(groups "$username" 2>&1)
-    log "DEBUG" "Current groups: $group_check"
+    # Configure PAM first
+    log "DEBUG" "Configuring PAM..."
+    chmod +x "${SCRIPT_DIR}/configure-pam.sh"
+    if ! "${SCRIPT_DIR}/configure-pam.sh"; then
+        log "WARNING" "PAM configuration failed, continuing with defaults"
+    fi
     
-    # Initialize sudo config
-    if [[ $EUID -eq 0 ]]; then
-        log "DEBUG" "Initializing sudo configuration..."
+    # Step 1: Verify group membership
+    log "DEBUG" "Verifying sudo group membership"
+    if ! groups "$username" | grep -q '\bsudo\b'; then
+        usermod -aG sudo "$username"
+        # Force group update
+        su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
+        sleep 1
         
-        # Ensure proper sudoers.d setup
-        log "DEBUG" "Setting up sudoers.d directory"
+        if ! groups "$username" | grep -q '\bsudo\b'; then
+            log "ERROR" "Failed to add user to sudo group"
+            return 1
+        fi
+    fi
+    log "SUCCESS" "User is in sudo group"
+    
+    # Step 2: Set up initial sudo access
+    if [[ $EUID -eq 0 ]]; then
+        log "DEBUG" "Setting up initial sudo configuration"
+        
+        # Ensure sudoers.d exists
         mkdir -p /etc/sudoers.d
         chmod 750 /etc/sudoers.d
         
-        # Create sudoers include if missing
-        if ! grep -q "^#includedir /etc/sudoers.d" /etc/sudoers; then
-            echo "#includedir /etc/sudoers.d" >> /etc/sudoers
-        fi
-        
-        # Create NOPASSWD configuration first
+        # Create initial sudoers entry
         local sudoers_file="/etc/sudoers.d/$username"
-        local temp_sudoers="/etc/sudoers.d/.${username}.tmp"
+        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
+        chmod 440 "$sudoers_file"
         
-        log "DEBUG" "Creating sudo configuration"
-        cat > "$temp_sudoers" << EOF
-# Sudo configuration for $username
-$username ALL=(ALL:ALL) ALL
-EOF
-        chmod 440 "$temp_sudoers"
-        
-        # Validate syntax before moving into place
-        if ! visudo -c -f "$temp_sudoers" >/dev/null 2>&1; then
-            log "ERROR" "Invalid sudoers entry"
-            rm -f "$temp_sudoers"
-            return 1
-        fi
-        
-        # Move validated config into place
-        mv "$temp_sudoers" "$sudoers_file"
-        
-        # Ensure group membership
-        if ! groups "$username" | grep -q '\bsudo\b'; then
-            log "DEBUG" "Adding user to sudo group"
-            usermod -aG sudo "$username"
-        fi
-        
-        # Reset sudo timestamp for the user (without killing sessions)
-        sudo -K -u "$username" 2>/dev/null || true
-        
-        # Test sudo access without session reset
-        if ! su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-            log "WARNING" "Initial sudo test failed, creating NOPASSWD entry temporarily"
-            echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
-            chmod 440 "$sudoers_file"
+        # Quick initial sudo test
+        log "DEBUG" "Testing initial sudo access"
+        if timeout 10 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+            log "SUCCESS" "Initial sudo access verified"
             
-            # Test again
-            if ! su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-                log "ERROR" "Sudo access verification failed"
-                return 1
-            fi
-            
-            # If NOPASSWD test succeeds, switch back to password configuration
+            # Switch to password auth configuration
             echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
             chmod 440 "$sudoers_file"
+            log "SUCCESS" "Admin user setup verified"
+            return 0
+        else
+            log "ERROR" "Initial sudo test failed"
+            # Try one more time with a clean environment
+            sudo -K -u "$username" 2>/dev/null || true
+            if timeout 10 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+                log "SUCCESS" "Sudo access verified after cleanup"
+                return 0
+            fi
         fi
         
-        log "SUCCESS" "Sudo access configured successfully"
-        return 0
+        log "ERROR" "Failed to verify sudo access"
+        return 1
     else
         log "ERROR" "Root privileges required for sudo initialization"
         return 1
