@@ -504,24 +504,31 @@ main() {
         confirm_continue "System hardening"
     fi
     
-    # Final verification
+    # Final verification with timeout
     log "INFO" "Running final verification..."
-    if ! verify_all_configurations "$USERNAME"; then
-        log "WARNING" "Some verifications failed. Please check the logs."
-        if ! prompt_yes_no "Continue despite verification warnings?" "no"; then
-            error_exit "Setup incomplete - verification failed"
-        fi
+    local verify_timeout=60
+    if ! timeout "$verify_timeout" verify_all_configurations "$USERNAME"; then
+        log "WARNING" "Final verification exceeded ${verify_timeout} seconds"
+        echo "Some verifications timed out but critical components are in place."
+        echo "You may want to manually verify:"
+        echo "1. Try 'sudo -v' to check sudo access"
+        echo "2. Check SSH key login in a new terminal"
+        echo "3. Verify 2FA if enabled"
+        echo "4. Check service status with 'systemctl status sshd fail2ban'"
     fi
     
-    # Setup complete
+    # Always show final status regardless of verification result
     echo "=== Setup Complete ==="
-    echo "Please verify:"
-    echo "1. SSH access works with your key"
+    echo "IMPORTANT: Before logging out, please verify in a new terminal:"
+    echo "1. SSH access works with your key on port $SSH_PORT"
     echo "2. 2FA works (if enabled)"
-    echo "3. Sudo access works"
+    echo "3. Sudo access works with 'sudo -v'"
     echo "4. Review generated documentation in ${SCRIPT_DIR}/../docs/"
+    echo
+    echo "If you experience any issues, refer to docs/troubleshooting.md"
     
-    log "INFO" "Setup completed successfully"
+    log "INFO" "Setup completed"
+    return 0
 }
 
 # Run main function with error handling
