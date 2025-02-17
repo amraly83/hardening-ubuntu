@@ -71,109 +71,38 @@ check_prerequisites() {
 }
 
 setup_admin_user() {
-    echo -e "\n=== Step 1: Admin User Setup ===" >&2
-    local NEW_ADMIN_USER
+    local USERNAME=""
     local max_attempts=3
     local attempt=1
     
+    echo -e "\n=== Step 1: Admin User Setup ===" >&2
+    
     while [[ $attempt -le $max_attempts ]]; do
-        read -r -p "Enter username for the new admin user: " NEW_ADMIN_USER >&2
+        # Get username input
+        read -r -p "Enter username for the new admin user: " USERNAME >&2
         
         # Check if username is empty
-        if [[ -z "$NEW_ADMIN_USER" ]]; then
+        if [[ -z "$USERNAME" ]]; then
             log "ERROR" "Username cannot be empty" >&2
             ((attempt++))
             continue
         fi
         
-        # First validate the username format
-        if ! validate_username "$NEW_ADMIN_USER" >&2; then
-            ((attempt++))
-            continue
+        # Clean username immediately
+        USERNAME=$(echo "$USERNAME" | tr -cd 'a-z0-9_-')
+        
+        # Create admin user
+        if USERNAME=$("${SCRIPT_DIR}/create-admin.sh" "$USERNAME"); then
+            # Store username in progress tracking
+            set_username "$USERNAME"
+            track_progress "admin_user" "completed"
+            printf "%s" "$USERNAME"
+            return 0
         fi
         
-        # Check if user exists
-        if id "$NEW_ADMIN_USER" >/dev/null 2>&1; then
-            if is_user_admin "$NEW_ADMIN_USER"; then
-                log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin" >&2
-                if prompt_yes_no "Would you like to use this existing admin user" "yes" >&2; then
-                    # Pre-setup verification steps
-                    log "DEBUG" "Running pre-verification setup..." >&2
-                    
-                    # Ensure basic PAM config exists
-                    if [[ ! -f "/etc/pam.d/sudo" ]] || ! grep -q "^auth.*sufficient.*pam_unix.so" "/etc/pam.d/sudo"; then
-                        log "DEBUG" "Creating basic PAM configuration" >&2
-                        echo "auth sufficient pam_unix.so" > "/etc/pam.d/sudo"
-                        chmod 644 "/etc/pam.d/sudo"
-                    fi
-                    
-                    # Initialize sudo
-                    if [[ $EUID -eq 0 ]]; then
-                        log "DEBUG" "Pre-initializing sudo access..." >&2
-                        chmod +x "${SCRIPT_DIR}/init-sudo.sh"
-                        if "${SCRIPT_DIR}/init-sudo.sh" "$NEW_ADMIN_USER"; then
-                            printf "%s" "$NEW_ADMIN_USER"
-                            return 0
-                        else
-                            log "WARNING" "Initial sudo setup failed, continuing anyway" >&2
-                        fi
-                    fi
-                    printf "%s" "$NEW_ADMIN_USER"
-                    return 0
-                fi
-            else
-                log "WARNING" "User '$NEW_ADMIN_USER' exists but is not an admin" >&2
-                if prompt_yes_no "Would you like to grant admin privileges to this user" "no" >&2; then
-                    log "INFO" "Adding '$NEW_ADMIN_USER' to sudo group" >&2
-                    if usermod -aG sudo "$NEW_ADMIN_USER"; then
-                        # Initialize sudo access
-                        if [[ $EUID -eq 0 ]]; then
-                            log "DEBUG" "Pre-initializing sudo access..." >&2
-                            echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
-                            chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
-                            sleep 2
-                        fi
-                        # Verify sudo access after adding to group
-                        if verify_sudo_access "$NEW_ADMIN_USER"; then
-                            log "INFO" "Sudo access granted and verified" >&2
-                            printf "%s" "$NEW_ADMIN_USER"
-                            return 0
-                        else
-                            log "ERROR" "Failed to verify sudo access after granting privileges" >&2
-                        fi
-                    else
-                        log "ERROR" "Failed to add user to sudo group" >&2
-                    fi
-                fi
-            fi
-            
-            # If we get here, all attempts to use/fix existing user failed
-            if [[ $attempt -eq $max_attempts ]]; then
-                error_exit "Maximum attempts reached. Please resolve sudo access issues before proceeding"
-            fi
-            echo "Please enter a different username" >&2
-            ((attempt++))
-            continue
-            
-        else
-            # Create new user
-            log "INFO" "Creating new admin user: $NEW_ADMIN_USER" >&2
-            if ! "${SCRIPT_DIR}/create-admin.sh" "$NEW_ADMIN_USER"; then
-                log "ERROR" "Failed to create admin user"
-                return 1
-            fi
-            
-            # Initialize sudo access using dedicated script
-            log "DEBUG" "Initializing sudo access..."
-            chmod +x "${SCRIPT_DIR}/init-sudo-access.sh"
-            if "${SCRIPT_DIR}/init-sudo-access.sh" "$NEW_ADMIN_USER"; then
-                log "SUCCESS" "Sudo access initialized"
-                printf "%s" "$NEW_ADMIN_USER"
-                return 0
-            fi
-            
-            log "ERROR" "Failed to initialize sudo access"
-            return 1
+        ((attempt++))
+        if [[ $attempt -le $max_attempts ]]; then
+            log "WARNING" "Admin user creation failed, retrying..." >&2
         fi
     done
     
@@ -205,22 +134,34 @@ setup_ssh_keys() {
 
 setup_2fa() {
     local username="$1"
-    echo "=== Step 3: Two-Factor Authentication Setup ==="
+    echo -e "\n=== Step 3: Two-Factor Authentication Setup ==="
+    
+    # Ensure we're working with the new admin user
+    if [[ -z "$username" ]]; then
+        log "ERROR" "No admin username provided for 2FA setup"
+        return 1
+    fi
     
     if prompt_yes_no "Would you like to set up 2FA for SSH access" "yes"; then
-        log "INFO" "Setting up 2FA for $username"
+        log "INFO" "Setting up 2FA for admin user: $username"
         echo "Please have Google Authenticator app ready on your mobile device"
         
         if ! "${SCRIPT_DIR}/setup-2fa.sh" "$username"; then
             error_exit "Failed to set up 2FA"
         fi
         
-        echo "Please test 2FA login in a new terminal before continuing!"
-        if ! prompt_yes_no "Have you successfully tested 2FA login" "no"; then
+        # Verify 2FA setup
+        if ! verify_step "2FA setup" "$username"; then
+            error_exit "2FA verification failed"
+        fi
+        
+        track_progress "2fa" "completed"
+        if ! prompt_yes_no "Have you successfully tested 2FA login in another terminal" "no"; then
             error_exit "Please verify 2FA login before proceeding"
         fi
     else
         log "INFO" "2FA setup skipped"
+        track_progress "2fa" "skipped"
     fi
 }
 
@@ -420,6 +361,9 @@ main() {
         fi
     done
     
+    # Store username in progress tracking
+    set_username "$USERNAME"
+    
     verify_step "Admin user setup" "$USERNAME" || {
         error_exit "Failed to verify admin user setup"
     }
@@ -432,9 +376,9 @@ main() {
     }
     confirm_continue "SSH key setup"
     
-    # Setup 2FA if requested
-    if prompt_yes_no "Would you like to set up 2FA?" "yes"; then
-        setup_2fa "$USERNAME"
+    # Setup 2FA specifically for the new admin user
+    setup_2fa "$USERNAME"
+    if is_step_completed "2fa"; then
         verify_step "2FA setup" "$USERNAME" || {
             error_exit "Failed to verify 2FA setup"
         }
