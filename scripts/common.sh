@@ -208,13 +208,18 @@ prompt_yes_no() {
     local default="${2:-yes}"
     local answer
     
+    # Define color codes
+    local COLOR_PROMPT='\033[1;36m'  # Bright Cyan for prompts
+    local COLOR_RESET='\033[0m'
+    
     while true; do
-        read -rp "$prompt [${default}]: " answer
+        printf "${COLOR_PROMPT}%s [%s]${COLOR_RESET}: " "$prompt" "$default"
+        read -r answer
         answer=${answer:-$default}
         case "${answer,,}" in
             yes|y) return 0 ;;
             no|n) return 1 ;;
-            *) echo "Please answer 'yes' or 'no'" ;;
+            *) printf "${COLOR_PROMPT}Please answer 'yes' or 'no'${COLOR_RESET}\n" ;;
         esac
     done
 }

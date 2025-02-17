@@ -7,6 +7,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMON_SH="${SCRIPT_DIR}/common.sh"
 
+# Define color codes
+readonly COLOR_PROMPT='\033[1;36m'    # Bright Cyan for prompts
+readonly COLOR_ERROR='\033[1;31m'     # Bright Red for errors
+readonly COLOR_RESET='\033[0m'
+
 # Set log file first (before sourcing common.sh)
 LOG_FILE="/var/log/server-hardening.log"
 
@@ -14,7 +19,7 @@ LOG_FILE="/var/log/server-hardening.log"
 sed -i 's/\r$//' "$COMMON_SH"
 
 # Source common functions
-source "$COMMON_SH" || { echo "Error: Failed to source $COMMON_SH"; exit 1; }
+source "$COMMON_SH" || { echo -e "${COLOR_ERROR}Error: Failed to source $COMMON_SH${COLOR_RESET}"; exit 1; }
 
 # Initialize script (after sourcing common.sh)
 init_script || { echo "Error: Failed to initialize script"; exit 1; }
@@ -61,14 +66,15 @@ get_valid_username() {
     
     while [[ $attempt -le $max_attempts ]]; do
         if [ -z "${1:-}" ]; then
-            read -r -p "Enter new admin username: " username
+            printf "${COLOR_PROMPT}Enter new admin username${COLOR_RESET}: "
+            read -r username
         else
             username="$1"
         fi
         
         # Basic validation before calling validate_username
         if [[ -z "$username" ]]; then
-            log "ERROR" "Username cannot be empty"
+            echo -e "${COLOR_ERROR}Error: Username cannot be empty${COLOR_RESET}"
             if [ -n "${1:-}" ]; then
                 return 1
             fi

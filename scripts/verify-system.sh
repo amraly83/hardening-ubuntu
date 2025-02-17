@@ -7,15 +7,34 @@ set -euo pipefail
 LOG_FILE="/var/log/server-hardening.log"
 CONFIG_FILE="/etc/server-hardening/hardening.conf"
 
-# Basic logging function
+# Define color codes
+readonly COLOR_ERROR='\033[1;31m'    # Bright Red for errors
+readonly COLOR_WARNING='\033[1;33m'   # Bright Yellow for warnings
+readonly COLOR_INFO='\033[1;34m'      # Bright Blue for info
+readonly COLOR_SUCCESS='\033[1;32m'   # Bright Green for success
+readonly COLOR_PROMPT='\033[1;36m'    # Bright Cyan for prompts
+readonly COLOR_RESET='\033[0m'
+
+# Basic logging function with colors
 log() {
     local level="$1"
     shift
     local message="$*"
     local timestamp
+    local color=""
     timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] $message" >&2
+    
+    case "${level^^}" in
+        "ERROR") color="$COLOR_ERROR" ;;
+        "WARNING") color="$COLOR_WARNING" ;;
+        "INFO") color="$COLOR_INFO" ;;
+        "SUCCESS") color="$COLOR_SUCCESS" ;;
+        "DEBUG") color="$COLOR_INFO" ;;
+    esac
+    
+    echo -e "${color}[$timestamp] [$level] $message${COLOR_RESET}" >&2
     if [[ -n "${LOG_FILE:-}" ]]; then
+        # Strip color codes for log file
         echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
     fi
 }
@@ -151,7 +170,7 @@ main() {
 
 # Check arguments
 if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 username"
+    echo -e "${COLOR_ERROR}Usage: $0 username${COLOR_RESET}"
     exit 1
 fi
 
