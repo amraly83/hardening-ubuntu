@@ -456,57 +456,25 @@ ensure_sudo_membership() {
         current_groups=$(groups "$username" 2>&1)
         log "DEBUG" "Current groups before modification: $current_groups"
         
-        if echo "$current_groups" | grep -qE '\b(sudo|admin|wheel)\b'; then
-            log "SUCCESS" "User $username is in sudo group"
-            # Verify group file entry
-            if ! grep -q "^sudo:.*:.*:.*\b${username}\b" /etc/group; then
-                log "DEBUG" "Fixing group file entry"
-                usermod -aG sudo "$username" || true
-            fi
-            return 0
-        fi
+        # Add to sudo group regardless of current status to ensure membership
+        usermod -aG sudo "$username" 2>/dev/null || true
         
-        log "WARNING" "User $username not in sudo group, attempting to add..."
-        
-        # Try different methods to add to sudo group
-        if ! usermod -aG sudo "$username"; then
-            log "DEBUG" "usermod failed, trying direct group file modification"
-            # Backup group file
-            cp /etc/group /etc/group.bak
-            # Try to add directly to group file
-            if ! sed -i "/^sudo:/s/$/,${username}/" /etc/group; then
-                log "ERROR" "Failed to modify group file"
-                mv /etc/group.bak /etc/group
+        # Create initial NOPASSWD sudoers entry if running as root
+        if [[ $EUID -eq 0 ]]; then
+            if [[ ! -f "/etc/sudoers.d/$username" ]]; then
+                log "DEBUG" "Creating initial NOPASSWD sudoers entry"
+                echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
+                chmod 440 "/etc/sudoers.d/$username"
             fi
         fi
         
         # Force group update
-        log "DEBUG" "Forcing group update"
         pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+        sleep 1
         
-        # Try newgrp method
-        su - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
-        
-        # Create or update sudoers entry
-        if [[ ! -f "/etc/sudoers.d/$username" ]]; then
-            log "DEBUG" "Creating sudoers entry"
-            echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
-            chmod 440 "/etc/sudoers.d/$username"
-        fi
-        
-        # Verify group membership again with newgrp
-        if su - "$username" -c "newgrp sudo >/dev/null 2>&1 && groups" | grep -qE '\b(sudo|admin|wheel)\b'; then
-            log "SUCCESS" "Verified sudo group membership with newgrp"
-            return 0
-        fi
-        
-        # If still not in group, try restarting session
-        log "DEBUG" "Attempting session restart for group update"
-        pkill -KILL -u "$username" >/dev/null 2>&1 || true
-        sleep 2
-        
-        if groups "$username" | grep -qE '\b(sudo|admin|wheel)\b'; then
-            log "SUCCESS" "Sudo group membership verified after session restart"
+        # Verify group membership with newgrp
+        if su - "$username" -c "newgrp sudo >/dev/null 2>&1 && sudo -n true" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified with NOPASSWD"
             return 0
         fi
         

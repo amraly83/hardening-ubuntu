@@ -350,7 +350,7 @@ verify_admin_setup() {
             echo "#includedir /etc/sudoers.d" >> /etc/sudoers
         fi
         
-        # Create or update sudoers file with NOPASSWD initially
+        # Always start with NOPASSWD configuration
         local sudoers_file="/etc/sudoers.d/$username"
         log "DEBUG" "Creating temporary NOPASSWD sudo access"
         echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
@@ -375,80 +375,34 @@ verify_admin_setup() {
         log "DEBUG" "Refreshing group membership"
         pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
         
-        # Try multiple sudo initialization methods
-        log "DEBUG" "Attempting sudo initialization methods..."
-        
-        # Method 1: Direct sudo command
-        if su -l "$username" -c "sudo -n true" >/dev/null 2>&1; then
-            log "SUCCESS" "Sudo access verified with direct command"
-            # Switch to password-required configuration
-            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
-            chmod 440 "$sudoers_file"
-            return 0
-        fi
-        
-        log "DEBUG" "Direct sudo command failed, trying alternatives..."
-        
-        # Method 2: Use sudo with explicit path
-        if su -l "$username" -c "/usr/bin/sudo -n /bin/true" >/dev/null 2>&1; then
-            log "SUCCESS" "Sudo access verified with explicit path"
-            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
-            chmod 440 "$sudoers_file"
-            return 0
-        fi
-        
-        # Method 3: Try with PAM session initialization
-        log "DEBUG" "Attempting PAM session initialization"
-        if ! grep -q "session.*required.*pam_unix.so" /etc/pam.d/sudo; then
-            echo "session required pam_unix.so" >> /etc/pam.d/sudo
-        fi
-        
-        # Method 4: Ensure proper PAM configuration
-        if ! grep -q "auth.*sufficient.*pam_unix.so" /etc/pam.d/sudo; then
-            cp /etc/pam.d/sudo /etc/pam.d/sudo.bak
-            sed -i '1i auth sufficient pam_unix.so' /etc/pam.d/sudo
-        fi
-        
-        # Method 5: Try with group refresh and new shell
-        log "DEBUG" "Attempting with new shell and group refresh"
-        if su -l "$username" -s /bin/bash -c "newgrp sudo >/dev/null 2>&1 && sudo -n true" >/dev/null 2>&1; then
-            log "SUCCESS" "Sudo access verified after group refresh"
-            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
-            chmod 440 "$sudoers_file"
-            return 0
-        fi
-        
-        # If all methods failed, collect diagnostic information
-        log "DEBUG" "Collecting sudo diagnostic information..."
-        
-        # Check sudo version and capabilities
-        local sudo_version
-        sudo_version=$(sudo -V | head -n1)
-        log "DEBUG" "Sudo version: $sudo_version"
-        
-        # Check PAM configuration
-        if [ -f /etc/pam.d/sudo ]; then
-            local pam_config
-            pam_config=$(grep -v '^#' /etc/pam.d/sudo)
-            log "DEBUG" "PAM sudo configuration: $pam_config"
-        fi
-        
-        # Check for any sudo errors in auth.log
-        if [ -f /var/log/auth.log ]; then
-            local auth_errors
-            auth_errors=$(grep "sudo.*$username" /var/log/auth.log | tail -n5)
-            if [ -n "$auth_errors" ]; then
-                log "DEBUG" "Recent sudo auth errors: $auth_errors"
+        # Initial sudo test with NOPASSWD
+        log "DEBUG" "Testing initial NOPASSWD sudo access"
+        if ! su -l "$username" -c "sudo -n true" >/dev/null 2>&1; then
+            log "DEBUG" "Initial NOPASSWD test failed, trying group refresh"
+            usermod -aG sudo "$username"
+            pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+            sleep 2
+            
+            # Try again after group refresh
+            if ! su -l "$username" -c "sudo -n true" >/dev/null 2>&1; then
+                log "ERROR" "Failed to verify sudo access even with NOPASSWD"
+                return 1
             fi
         fi
         
-        # Final attempt with debug output
-        local debug_output
-        debug_output=$(su -l "$username" -c "sudo -v" 2>&1)
-        log "DEBUG" "Final sudo verification output: $debug_output"
+        # If NOPASSWD test succeeds, switch to password-required configuration
+        log "DEBUG" "NOPASSWD verification successful, switching to password-required configuration"
+        echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+        chmod 440 "$sudoers_file"
         
-        log "ERROR" "All sudo initialization methods failed"
-        return 1
+        # Final verification that user is in sudo group
+        if ! groups "$username" | grep -q '\bsudo\b'; then
+            log "ERROR" "User is not in sudo group after configuration"
+            return 1
+        fi
+        
+        log "SUCCESS" "Sudo access configured successfully"
+        return 0
     else
         log "ERROR" "Root privileges required for sudo initialization"
         return 1
