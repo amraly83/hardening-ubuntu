@@ -597,3 +597,143 @@ init_script() {
         chmod 640 "$LOG_FILE"
     fi
 }
+
+# Sudo management functions
+clean_sudo_env() {
+    local username="$1"
+    
+    log "DEBUG" "Cleaning sudo environment for $username..."
+    # Kill all existing sudo sessions
+    sudo -K
+    sudo -k
+    
+    # Remove all sudo tokens for the user
+    rm -f /run/sudo/ts/* 2>/dev/null || true
+    
+    # Kill any existing user processes that might have sudo tokens
+    pkill -u "$username" || true
+    
+    # Wait for processes to terminate
+    sleep 2
+    
+    # Clear any remaining sudo session
+    if timeout 5 su -s /bin/bash - "$username" -c "sudo -k" 2>/dev/null; then
+        log "DEBUG" "Successfully cleared sudo session"
+    fi
+}
+
+test_sudo_access() {
+    local username="$1"
+    local max_retries="${2:-3}"
+    local retry=0
+    local delay=2
+    
+    # First ensure sudo group membership is correct
+    ensure_sudo_membership "$username"
+    
+    while [ $retry -lt $max_retries ]; do
+        log "DEBUG" "Testing sudo access (attempt $((retry + 1))/$max_retries)"
+        
+        # Try sudo access with specific shell to avoid environment issues
+        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified"
+            return 0
+        fi
+        
+        # Try alternative sudo test
+        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n id'" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified (using id command)"
+            return 0
+        fi
+        
+        ((retry++))
+        if [ $retry -lt $max_retries ]; then
+            log "WARNING" "Sudo test failed, retrying..."
+            clean_sudo_env "$username"
+            sleep "$delay"
+            ((delay *= 2))  # Exponential backoff
+        fi
+    done
+    
+    log "ERROR" "Failed to verify sudo access after $max_retries attempts"
+    return 1
+}
+
+setup_sudo_access() {
+    local username="$1"
+    local nopasswd="${2:-false}"
+    
+    # Setup sudo group
+    if ! getent group sudo >/dev/null 2>&1; then
+        log "INFO" "Creating sudo group"
+        groupadd sudo
+    fi
+    
+    # Clean existing sudo configuration
+    clean_sudo_env "$username"
+    
+    # Add user to sudo group and refresh groups
+    if ! groups "$username" | grep -q '\bsudo\b'; then
+        log "INFO" "Adding $username to sudo group"
+        usermod -aG sudo "$username"
+        # Force group update
+        sg sudo -c "id"
+        # Additional group update via user shell
+        su -s /bin/bash - "$username" -c "id" || true
+        sleep 2
+    fi
+    
+    # Setup sudoers directory with proper permissions
+    mkdir -p /etc/sudoers.d
+    chmod 750 /etc/sudoers.d
+    
+    # Configure sudo access
+    if [[ "$nopasswd" == "true" ]]; then
+        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
+    else
+        echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+    fi
+    chmod 440 "/etc/sudoers.d/$username"
+    
+    # Verify sudoers syntax
+    if ! visudo -c -f "/etc/sudoers.d/$username" >/dev/null 2>&1; then
+        log "ERROR" "Sudo configuration validation failed"
+        return 1
+    fi
+    
+    # Give the system a moment to register changes
+    sync
+    sleep 1
+    
+    return 0
+}
+
+ensure_sudo_membership() {
+    local username="$1"
+    local status=0
+    
+    # Verify sudo group exists
+    if ! getent group sudo >/dev/null 2>&1; then
+        log "INFO" "Creating sudo group"
+        groupadd sudo || status=1
+    fi
+    
+    # Check current group membership
+    if ! groups "$username" | grep -q '\bsudo\b'; then
+        log "INFO" "Adding $username to sudo group"
+        usermod -aG sudo "$username"
+        
+        # Force group update through various methods
+        sg sudo -c "id" || true
+        newgrp sudo || true
+        su -s /bin/bash - "$username" -c "id" || true
+        
+        # Verify group membership again
+        if ! groups "$username" | grep -q '\bsudo\b'; then
+            log "ERROR" "Failed to add user to sudo group"
+            status=1
+        fi
+    fi
+    
+    return $status
+}

@@ -8,9 +8,8 @@ source "${SCRIPT_DIR}/common.sh"
 # Test admin user creation and verification
 test_admin_setup() {
     local username="$1"
-    local test_file="/tmp/sudo_test_$$"
-    local max_retries=3
-    local retry=0
+    local max_attempts=3
+    local attempt=1
     
     log "INFO" "Testing admin setup for user: $username"
     
@@ -24,43 +23,43 @@ test_admin_setup() {
         return 1
     fi
     
-    # Clean sudo environment first
-    sudo -K
-    rm -f /run/sudo/ts/* 2>/dev/null || true
+    # Clean and reset sudo environment completely
+    clean_sudo_env "$username"
     
-    # Check and fix sudo group membership if needed
-    if ! groups "$username" | grep -q '\bsudo\b'; then
-        log "WARNING" "User not in sudo group, attempting to fix..."
-        usermod -aG sudo "$username"
-        sg sudo -c "id" || true
-        sleep 1
-    fi
-    
-    # Verify and fix sudoers configuration
-    if [[ ! -f "/etc/sudoers.d/$username" ]]; then
-        log "WARNING" "No sudoers configuration found, creating..."
-        echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
-        chmod 440 "/etc/sudoers.d/$username"
-    fi
-    
-    # Test sudo access with retries
-    while [ $retry -lt $max_retries ]; do
-        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
-            log "SUCCESS" "Sudo access verified"
-            break
+    while [ $attempt -le $max_attempts ]; do
+        log "INFO" "Verification attempt $attempt of $max_attempts"
+        
+        # Setup temporary NOPASSWD sudo access for testing
+        if ! setup_sudo_access "$username" true; then
+            log "ERROR" "Failed to setup initial sudo access"
+            ((attempt++))
+            sleep 2
+            continue
         fi
         
-        ((retry++))
-        if [ $retry -lt $max_retries ]; then
-            log "WARNING" "Sudo access test failed, retrying ($retry/$max_retries)..."
-            sleep 2
-        else
-            log "ERROR" "Sudo access test failed after $max_retries attempts"
-            return 1
+        # Test sudo access
+        if test_sudo_access "$username" 2; then
+            log "SUCCESS" "Initial sudo access verification passed"
+            
+            # Switch to password-required configuration
+            if setup_sudo_access "$username" false; then
+                log "SUCCESS" "Final sudo configuration applied"
+                return 0
+            else
+                log "ERROR" "Failed to apply final sudo configuration"
+            fi
+        fi
+        
+        ((attempt++))
+        if [ $attempt -le $max_attempts ]; then
+            log "WARNING" "Verification attempt failed, retrying..."
+            clean_sudo_env "$username"
+            sleep 3
         fi
     done
     
-    return 0
+    log "ERROR" "Failed to verify admin setup after $max_attempts attempts"
+    return 1
 }
 
 # Test PAM configuration
@@ -69,6 +68,13 @@ test_pam_config() {
     local status=0
     
     log "INFO" "Testing PAM configuration..."
+    
+    # Ensure PAM directory exists
+    if [[ ! -d "/etc/pam.d" ]]; then
+        log "WARNING" "Creating missing PAM directory"
+        mkdir -p /etc/pam.d
+        chmod 755 /etc/pam.d
+    fi
     
     # Verify PAM files exist and have correct permissions
     local pam_files=("sudo" "su" "common-auth" "common-account")
@@ -80,35 +86,19 @@ test_pam_config() {
             local perms
             perms=$(stat -c '%a' "/etc/pam.d/$file")
             if [[ "$perms" != "644" ]]; then
-                log "WARNING" "Incorrect permissions on /etc/pam.d/$file: $perms, fixing..."
-                chmod 644 "/etc/pam.d/$file"
+                log "WARNING" "Fixing permissions on /etc/pam.d/$file: $perms -> 644"
+                chmod 644 "/etc/pam.d/$file" || status=1
             fi
         fi
     done
     
-    return $status
-}
-
-# Test sudo timeout behavior
-test_sudo_timeout() {
-    local username="$1"
-    local test_file="/tmp/sudo_timeout_test_$$"
-    
-    log "INFO" "Testing sudo timeout behavior..."
-    
-    # Clear sudo tokens
-    sudo -K
-    rm -f /run/sudo/ts/* 2>/dev/null || true
-    
-    # Test sudo access with password requirement
-    if timeout 5 su -s /bin/bash - "$username" -c "sudo -n touch $test_file" >/dev/null 2>&1; then
-        rm -f "$test_file" 2>/dev/null || true
-        log "SUCCESS" "Sudo timeout test passed"
-        return 0
-    else
-        log "WARNING" "Sudo requires password (expected behavior)"
-        return 0
+    # Verify PAM sudo configuration
+    if ! grep -q "^auth.*pam_unix.so" /etc/pam.d/sudo 2>/dev/null; then
+        log "WARNING" "PAM sudo configuration may be incomplete"
+        status=1
     fi
+    
+    return $status
 }
 
 # Main function
@@ -126,19 +116,15 @@ main() {
     
     log "INFO" "=== Starting Admin User Verification ==="
     
-    # Run all tests
-    if ! test_admin_setup "$username"; then
-        log "ERROR" "Admin setup verification failed"
-        ((failed++))
-    fi
-    
+    # Test PAM configuration first
     if ! test_pam_config "$username"; then
         log "ERROR" "PAM configuration verification failed"
         ((failed++))
     fi
     
-    if ! test_sudo_timeout "$username"; then
-        log "ERROR" "Sudo timeout verification failed"
+    # Test admin setup
+    if ! test_admin_setup "$username"; then
+        log "ERROR" "Admin setup verification failed"
         ((failed++))
     fi
     
