@@ -88,6 +88,12 @@ main() {
     # Start installation
     log "INFO" "Starting server hardening installation..."
     
+    # Verify system state first
+    stage="state_verification"
+    if ! "${SCRIPT_DIR}/verify-state.sh"; then
+        error_exit "System state verification failed"
+    fi
+    
     # Fix critical permissions first
     stage="permissions"
     if ! "${SCRIPT_DIR}/fix-permissions.sh"; then

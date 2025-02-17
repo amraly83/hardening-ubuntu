@@ -15,6 +15,14 @@ run_preflight_checks() {
     
     log "INFO" "Running preflight checks..."
     
+    # Check system resources and state first
+    if ! "${SCRIPT_DIR}/verify-state.sh"; then
+        log "WARNING" "System state verification reported issues"
+        if ! prompt_yes_no "Continue despite system state warnings?" "no"; then
+            success=false
+        fi
+    fi
+    
     # Check system resources
     check_system_resources || success=false
     
@@ -110,27 +118,30 @@ check_network_connectivity() {
     return $([ "$success" == "true" ])
 }
 
+# Updated file system permissions check
 check_fs_permissions() {
     local success=true
     
-    # Check critical directories
-    local dirs=(
-        "/etc/ssh:755"
-        "/etc/pam.d:755"
-        "/etc/sudoers.d:750"
-        "/var/log:755"
+    # Define critical directories and their expected permissions
+    declare -A dir_perms=(
+        ["/etc/ssh"]="755"
+        ["/etc/pam.d"]="755"
+        ["/etc/sudoers.d"]="750"
+        ["/var/log"]="755"
+        ["/var/backups"]="755"
     )
     
-    for entry in "${dirs[@]}"; do
-        local dir="${entry%:*}"
-        local expected_perm="${entry#*:}"
-        local current_perm
-        
+    for dir in "${!dir_perms[@]}"; do
+        local expected_perm="${dir_perms[$dir]}"
         if [[ -d "$dir" ]]; then
+            local current_perm
             current_perm=$(stat -c '%a' "$dir")
             if [[ "$current_perm" != "$expected_perm" ]]; then
                 log "ERROR" "Invalid permissions on $dir: $current_perm (expected $expected_perm)"
-                success=false
+                chmod "$expected_perm" "$dir" || {
+                    log "ERROR" "Failed to set permissions on $dir"
+                    success=false
+                }
             fi
         else
             log "ERROR" "Required directory not found: $dir"

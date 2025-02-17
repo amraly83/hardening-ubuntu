@@ -13,14 +13,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
     sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
     source "${SCRIPT_DIR}/common.sh"
+else
+    # Only define colors if common.sh is not available
+    declare -r COLOR_GREEN='\033[1;32m'
+    declare -r COLOR_RED='\033[1;31m'
+    declare -r COLOR_YELLOW='\033[1;33m'
+    declare -r COLOR_CYAN='\033[1;36m'
+    declare -r COLOR_RESET='\033[0m'
 fi
-
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_CYAN='\033[1;36m'
-readonly COLOR_RESET='\033[0m'
 
 # Function to create admin user
 create_admin() {
