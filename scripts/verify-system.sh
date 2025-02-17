@@ -7,15 +7,16 @@ set -euo pipefail
 LOG_FILE="/var/log/server-hardening.log"
 CONFIG_FILE="/etc/server-hardening/hardening.conf"
 
-# Define color codes
-readonly COLOR_ERROR='\033[1;31m'    # Bright Red for errors
-readonly COLOR_WARNING='\033[1;33m'   # Bright Yellow for warnings
-readonly COLOR_INFO='\033[1;34m'      # Bright Blue for info
-readonly COLOR_SUCCESS='\033[1;32m'   # Bright Green for success
-readonly COLOR_PROMPT='\033[1;36m'    # Bright Cyan for prompts
+# Define enhanced color codes for better visibility
+readonly COLOR_ERROR='\033[1;31m'      # Bright Red for errors
+readonly COLOR_WARNING='\033[1;33m'    # Bright Yellow for warnings
+readonly COLOR_INFO='\033[1;34m'       # Bright Blue for info
+readonly COLOR_SUCCESS='\033[1;32m'    # Bright Green for success
+readonly COLOR_PROMPT='\033[1;36m'     # Bright Cyan for prompts
+readonly COLOR_HIGHLIGHT='\033[1;37m'  # Bright White for highlights
 readonly COLOR_RESET='\033[0m'
 
-# Basic logging function with colors
+# Basic logging function with enhanced colors
 log() {
     local level="$1"
     shift
@@ -25,17 +26,32 @@ log() {
     timestamp=$(date +'%Y-%m-%d %H:%M:%S')
     
     case "${level^^}" in
-        "ERROR") color="$COLOR_ERROR" ;;
-        "WARNING") color="$COLOR_WARNING" ;;
-        "INFO") color="$COLOR_INFO" ;;
-        "SUCCESS") color="$COLOR_SUCCESS" ;;
-        "DEBUG") color="$COLOR_INFO" ;;
+        "ERROR") 
+            color="$COLOR_ERROR"
+            message="❌ $message"
+            ;;
+        "WARNING") 
+            color="$COLOR_WARNING"
+            message="⚠️  $message"
+            ;;
+        "INFO") 
+            color="$COLOR_INFO"
+            message="ℹ️  $message"
+            ;;
+        "SUCCESS") 
+            color="$COLOR_SUCCESS"
+            message="✅ $message"
+            ;;
+        "DEBUG") 
+            color="$COLOR_INFO"
+            message="🔍 $message"
+            ;;
     esac
     
-    echo -e "${color}[$timestamp] [$level] $message${COLOR_RESET}" >&2
+    echo -e "${color}[$timestamp] [${level^^}] ${message}${COLOR_RESET}" >&2
     if [[ -n "${LOG_FILE:-}" ]]; then
-        # Strip color codes for log file
-        echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+        # Strip color codes and emoji for log file
+        echo "[$timestamp] [${level^^}] ${message}" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> "$LOG_FILE"
     fi
 }
 
@@ -146,6 +162,7 @@ main() {
     local username="$1"
     local all_passed=0
     
+    echo -e "\n${COLOR_HIGHLIGHT}=== System Verification Starting ===${COLOR_RESET}\n"
     log "INFO" "Starting system verification..."
     
     # Load configuration
@@ -153,17 +170,22 @@ main() {
     
     # Clean username and verify
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    echo -e "\n${COLOR_PROMPT}>>> Verifying user: ${COLOR_HIGHLIGHT}$username${COLOR_RESET}\n"
     verify_user "$username" || all_passed=1
+    
+    echo -e "\n${COLOR_PROMPT}>>> Verifying system services${COLOR_RESET}\n"
     verify_services || all_passed=1
     
     # Final status
+    echo
     if [[ $all_passed -eq 0 ]]; then
-        log "SUCCESS" "All verifications passed"
-        echo "System verification completed successfully"
+        echo -e "${COLOR_SUCCESS}✅ All verifications passed${COLOR_RESET}"
+        echo -e "${COLOR_SUCCESS}✅ System verification completed successfully${COLOR_RESET}"
     else
-        log "WARNING" "Some verifications failed"
-        echo "System verification completed with warnings"
+        echo -e "${COLOR_WARNING}⚠️  Some verifications failed${COLOR_RESET}"
+        echo -e "${COLOR_WARNING}⚠️  System verification completed with warnings${COLOR_RESET}"
     fi
+    echo
     
     return $all_passed
 }

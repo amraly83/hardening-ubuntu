@@ -3,11 +3,14 @@
 # Set strict mode
 set -euo pipefail
 
-# Basic initialization first, before any function declarations
-readonly COLOR_RED='\033[0;31m'
-readonly COLOR_GREEN='\033[0;32m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_BLUE='\033[0;34m'
+# Color definitions with bright variants for better visibility
+readonly COLOR_RED='\033[1;31m'      # Bright Red for errors
+readonly COLOR_GREEN='\033[1;32m'     # Bright Green for success
+readonly COLOR_YELLOW='\033[1;33m'    # Bright Yellow for warnings
+readonly COLOR_BLUE='\033[1;34m'      # Bright Blue for info
+readonly COLOR_MAGENTA='\033[1;35m'   # Bright Magenta for important notes
+readonly COLOR_CYAN='\033[1;36m'      # Bright Cyan for prompts
+readonly COLOR_WHITE='\033[1;37m'     # Bright White for highlights
 readonly COLOR_RESET='\033[0m'
 
 # Initialize logging variables
@@ -208,18 +211,15 @@ prompt_yes_no() {
     local default="${2:-yes}"
     local answer
     
-    # Define color codes
-    local COLOR_PROMPT='\033[1;36m'  # Bright Cyan for prompts
-    local COLOR_RESET='\033[0m'
-    
     while true; do
-        printf "${COLOR_PROMPT}%s [%s]${COLOR_RESET}: " "$prompt" "$default"
+        # More noticeable prompt with background color
+        printf "${COLOR_CYAN}>>> %s${COLOR_WHITE} [%s]${COLOR_RESET}: " "$prompt" "$default"
         read -r answer
         answer=${answer:-$default}
         case "${answer,,}" in
             yes|y) return 0 ;;
             no|n) return 1 ;;
-            *) printf "${COLOR_PROMPT}Please answer 'yes' or 'no'${COLOR_RESET}\n" ;;
+            *) printf "${COLOR_YELLOW}Please answer '${COLOR_WHITE}yes${COLOR_YELLOW}' or '${COLOR_WHITE}no${COLOR_YELLOW}'${COLOR_RESET}\n" ;;
         esac
     done
 }
