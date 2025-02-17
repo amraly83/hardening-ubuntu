@@ -16,7 +16,7 @@ setup_ssh_keys() {
     # Verify user exists
     if ! id -u "$username" >/dev/null 2>&1; then
         error_exit "User $username does not exist"
-    }
+    fi
 
     log "INFO" "Setting up SSH keys for user $username"
 
