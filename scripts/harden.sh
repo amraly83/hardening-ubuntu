@@ -41,10 +41,10 @@ configure_ssh() {
         error_exit "SSH_ALLOW_USERS must be configured"
     fi
     
-    # Generate new SSH config
-    cat > "/etc/ssh/sshd_config" << 'EOF'
+    # Generate new SSH config with proper variable expansion
+    cat > "/etc/ssh/sshd_config" << EOF
 # Security hardened sshd_config
-Port ${SSH_PORT}
+Port $SSH_PORT
 Protocol 2
 
 # Authentication
@@ -56,7 +56,7 @@ ChallengeResponseAuthentication ${MFA_ENABLED}
 UsePAM yes
 
 # Allow only specific users
-AllowUsers ${SSH_ALLOW_USERS}
+AllowUsers $SSH_ALLOW_USERS
 
 # Security options
 X11Forwarding no
@@ -273,10 +273,39 @@ main() {
     # shellcheck source=/dev/null
     source "$CONFIG_FILE" || error_exit "Failed to load configuration"
     
-    # Validate required settings
-    for var in SSH_PORT SSH_ALLOW_USERS FIREWALL_ADDITIONAL_PORTS; do
-        if [[ -z "${!var}" ]]; then
-            error_exit "Required configuration variable $var is not set in $CONFIG_FILE"
+    # Validate required settings and their formats
+    # Validate SSH port
+    if [[ -z "${SSH_PORT}" ]]; then
+        error_exit "Required configuration variable SSH_PORT is not set in $CONFIG_FILE"
+    fi
+    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+        error_exit "Invalid SSH_PORT: '$SSH_PORT'. Must be a number between 1 and 65535"
+    fi
+    
+    # Validate SSH allow users
+    if [[ -z "${SSH_ALLOW_USERS}" ]]; then
+        error_exit "Required configuration variable SSH_ALLOW_USERS is not set in $CONFIG_FILE"
+    fi
+    
+    # Validate firewall ports
+    if [[ -z "${FIREWALL_ADDITIONAL_PORTS}" ]]; then
+        error_exit "Required configuration variable FIREWALL_ADDITIONAL_PORTS is not set in $CONFIG_FILE"
+    fi
+    for port in $(echo "$FIREWALL_ADDITIONAL_PORTS" | tr ',' ' '); do
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            error_exit "Invalid port in FIREWALL_ADDITIONAL_PORTS: '$port'. Must be a number between 1 and 65535"
+        fi
+    done
+    
+    # Convert yes/no settings to proper format
+    MFA_ENABLED=$(echo "${MFA_ENABLED:-yes}" | tr '[:upper:]' '[:lower:]')
+    ENABLE_AUTO_UPDATES=$(echo "${ENABLE_AUTO_UPDATES:-yes}" | tr '[:upper:]' '[:lower:]')
+    ENABLE_IPV6=$(echo "${ENABLE_IPV6:-no}" | tr '[:upper:]' '[:lower:]')
+    
+    # Validate yes/no settings
+    for var in MFA_ENABLED ENABLE_AUTO_UPDATES ENABLE_IPV6; do
+        if [[ ! "${!var}" =~ ^(yes|no)$ ]]; then
+            error_exit "Invalid value for $var: '${!var}'. Must be 'yes' or 'no'"
         fi
     done
     
