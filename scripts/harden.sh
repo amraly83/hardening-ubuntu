@@ -205,6 +205,82 @@ EOF
     sysctl -p /etc/sysctl.d/99-security.conf
 }
 
+configure_pam() {
+    log "INFO" "Configuring PAM for sudo and su..."
+    
+    # Backup PAM files
+    backup_file "/etc/pam.d/sudo"
+    backup_file "/etc/pam.d/su"
+    
+    # Configure sudo PAM
+    cat > "/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+auth       sufficient   pam_unix.so try_first_pass
+auth       sufficient   pam_sudo.so
+session    required     pam_env.so readenv=1 user_readenv=0
+session    required     pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+session    required     pam_unix.so
+EOF
+    
+    # Configure su PAM
+    cat > "/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+auth       sufficient   pam_rootok.so
+auth       [success=ignore default=2] pam_succeed_if.so uid = 0 use_uid quiet
+auth       sufficient   pam_wheel.so trust use_uid group=sudo
+auth       sufficient   pam_unix.so try_first_pass
+auth       required     pam_deny.so
+password   include      common-password
+session    include      common-session
+session    optional     pam_xauth.so
+EOF
+
+    # Verify PAM configuration syntax
+    if ! pam-auth-update --dry-run >/dev/null 2>&1; then
+        log "ERROR" "Invalid PAM configuration"
+        restore_from_backup "/etc/pam.d/sudo"
+        restore_from_backup "/etc/pam.d/su"
+        return 1
+    fi
+    
+    log "SUCCESS" "PAM configuration updated"
+    return 0
+}
+
+configure_sudo() {
+    log "INFO" "Configuring sudo policies..."
+    
+    # Backup sudoers file
+    backup_file "/etc/sudoers"
+    
+    # Create a specific sudoers file for user switching
+    cat > "/etc/sudoers.d/user-switching" << 'EOF'
+# Allow members of sudo group to switch users without password
+%sudo ALL=(ALL) NOPASSWD: /bin/su - [A-Za-z0-9]*
+%sudo ALL=(ALL) NOPASSWD: /usr/bin/su - [A-Za-z0-9]*
+
+# Allow sudo users to run sudo without password
+%sudo ALL=(ALL) NOPASSWD: /usr/bin/sudo -l
+%sudo ALL=(ALL) NOPASSWD: /usr/bin/sudo -v
+
+# Defaults specific to sudo group
+Defaults:%sudo !requiretty
+Defaults:%sudo timestamp_timeout=30
+EOF
+
+    chmod 440 "/etc/sudoers.d/user-switching"
+    
+    # Validate sudoers configuration
+    if ! visudo -c; then
+        log "ERROR" "Invalid sudoers configuration"
+        rm -f "/etc/sudoers.d/user-switching"
+        return 1
+    fi
+    
+    log "SUCCESS" "Sudo configuration updated"
+    return 0
+}
+
 restore_from_backup() {
     local file="$1"
     local latest_backup
@@ -310,11 +386,13 @@ main() {
     done
     
     # Perform hardening
-    configure_ssh
-    configure_firewall
-    configure_fail2ban
-    configure_automatic_updates
-    configure_sysctl
+    configure_ssh || error_exit "Failed to configure SSH"
+    configure_firewall || error_exit "Failed to configure firewall"
+    configure_fail2ban || error_exit "Failed to configure fail2ban"
+    configure_automatic_updates || error_exit "Failed to configure automatic updates"
+    configure_sysctl || error_exit "Failed to configure sysctl"
+    configure_pam || error_exit "Failed to configure PAM"
+    configure_sudo || error_exit "Failed to configure sudo"
     
     log "INFO" "System hardening completed successfully"
     echo "================================================================"
@@ -323,6 +401,8 @@ main() {
     echo "2. Firewall is active with correct rules"
     echo "3. fail2ban is running"
     echo "4. Automatic updates are configured"
+    echo "5. User switching works without authentication for sudo users"
+    echo "    Example: su - otheruser (should work without password)"
     echo "================================================================"
 }
 
