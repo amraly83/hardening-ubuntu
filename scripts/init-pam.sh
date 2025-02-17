@@ -6,15 +6,9 @@ set -euo pipefail
 sed -i 's/\r$//' "${BASH_SOURCE[0]}"
 chmod +x "${BASH_SOURCE[0]}"
 
-# Get absolute path of script directory
+# Get absolute path of script directory and source common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
-
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_RESET='\033[0m'
 
 # Function to safely backup PAM files
 backup_pam_file() {

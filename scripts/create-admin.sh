@@ -18,11 +18,18 @@ create_admin() {
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
     log "DEBUG" "Creating admin user: $username"
     
+    # Ensure PAM directory exists
+    mkdir -p /etc/pam.d
+    
     # Initialize PAM first to ensure authentication works
     log "INFO" "Initializing PAM configuration..."
     if ! "${SCRIPT_DIR}/init-pam.sh"; then
-        log "ERROR" "PAM initialization failed"
-        return 1
+        # Try to fix PAM initialization
+        log "WARNING" "Initial PAM setup failed, attempting recovery..."
+        if ! "${SCRIPT_DIR}/configure-pam.sh"; then
+            log "ERROR" "PAM initialization failed"
+            return 1
+        fi
     fi
     
     # Create user if doesn't exist
@@ -43,33 +50,33 @@ create_admin() {
         log "INFO" "User $username already exists"
     fi
     
-    # Initialize sudo access
+    # Initialize sudo access with retries
     log "INFO" "Setting up sudo access..."
-    if ! "${SCRIPT_DIR}/init-sudo-access.sh" "$username"; then
-        log "ERROR" "Failed to initialize sudo access"
-        fix_sudo_auth "$username" || return 1
-    fi
-    
-    # Verify final setup with retries
-    local verify_attempts=3
+    local sudo_attempts=3
     local attempt=1
-    local verify_success=false
     
-    while [[ $attempt -le $verify_attempts ]]; do
-        log "DEBUG" "Verifying admin setup (attempt $attempt/$verify_attempts)"
-        if verify_admin_setup "$username"; then
-            verify_success=true
+    while [[ $attempt -le $sudo_attempts ]]; do
+        if "${SCRIPT_DIR}/init-sudo-access.sh" "$username"; then
             break
         fi
-        ((attempt++))
+        log "WARNING" "Sudo initialization attempt $attempt failed, retrying..."
         sleep 2
+        ((attempt++))
+        
+        if [[ $attempt -gt $sudo_attempts ]]; then
+            log "ERROR" "Failed to initialize sudo access after $sudo_attempts attempts"
+            return 1
+        fi
     done
     
-    if ! $verify_success; then
-        log "ERROR" "Failed to verify admin setup after $verify_attempts attempts"
+    # Verify final setup
+    log "INFO" "Verifying admin setup..."
+    if ! "${SCRIPT_DIR}/verify-admin-setup.sh" "$username"; then
+        log "ERROR" "Admin setup verification failed"
         return 1
     fi
     
+    log "SUCCESS" "Admin user setup completed successfully"
     return $status
 }
 
