@@ -4,267 +4,314 @@ set -euo pipefail
 
 # Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="${SCRIPT_DIR}/common.sh"
-
-# Source common functions
-if [[ -f "$COMMON_SH" ]]; then
-    source "$COMMON_SH"
-else
-    echo "Error: common.sh not found in $SCRIPT_DIR" >&2
-    exit 1
-fi
+source "${SCRIPT_DIR}/common.sh"
 
 # Initialize variables with defaults
-LOG_FILE="${LOG_FILE:-/var/log/server-hardening.log}"
-CONFIG_FILE="${CONFIG_FILE:-/etc/server-hardening/hardening.conf}"
+readonly DEFAULT_CONFIG="/etc/server-hardening/hardening.conf"
+readonly DEFAULT_LOG="/var/log/server-hardening.log"
+readonly REQUIRED_DIRS=(
+    "/etc/server-hardening"
+    "/var/log"
+)
+readonly REQUIRED_SERVICES=(
+    "sshd"
+    "fail2ban"
+    "ufw"
+)
 
-# Define enhanced color codes for better visibility
-readonly COLOR_ERROR='\033[1;31m'      # Bright Red for errors
-readonly COLOR_WARNING='\033[1;33m'    # Bright Yellow for warnings
-readonly COLOR_INFO='\033[1;34m'       # Bright Blue for info
-readonly COLOR_SUCCESS='\033[1;32m'    # Bright Green for success
-readonly COLOR_PROMPT='\033[1;36m'     # Bright Cyan for prompts
-readonly COLOR_HIGHLIGHT='\033[1;37m'  # Bright White for highlights
-readonly COLOR_RESET='\033[0m'
+# State tracking
+declare -A VERIFICATION_RESULTS
 
-# Check if required commands exist
-check_requirements() {
-    local missing_cmds=()
-    local required_cmds=("ssh" "sshd" "ufw" "fail2ban-client" "systemctl" "stat" "grep" "id")
+verify_filesystem() {
+    log "INFO" "Verifying filesystem requirements..."
+    local status=0
     
-    for cmd in "${required_cmds[@]}"; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing_cmds+=("$cmd")
+    # Check required directories
+    for dir in "${REQUIRED_DIRS[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            log "ERROR" "Required directory missing: $dir"
+            status=1
         fi
     done
     
-    if ((${#missing_cmds[@]} > 0)); then
-        log "ERROR" "Missing required commands: ${missing_cmds[*]}"
-        return 1
-    fi
-    return 0
-}
-
-# Basic logging function with enhanced colors
-log() {
-    local level="$1"
-    shift
-    local message="$*"
-    local timestamp
-    local color=""
-    timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-    
-    case "${level^^}" in
-        "ERROR") 
-            color="$COLOR_ERROR"
-            message="❌ $message"
-            ;;
-        "WARNING") 
-            color="$COLOR_WARNING"
-            message="⚠️  $message"
-            ;;
-        "INFO") 
-            color="$COLOR_INFO"
-            message="ℹ️  $message"
-            ;;
-        "SUCCESS") 
-            color="$COLOR_SUCCESS"
-            message="✅ $message"
-            ;;
-        "DEBUG") 
-            color="$COLOR_INFO"
-            message="🔍 $message"
-            ;;
-    esac
-    
-    echo -e "${color}[$timestamp] [${level^^}] ${message}${COLOR_RESET}" >&2
-    if [[ -n "${LOG_FILE:-}" ]]; then
-        # Strip color codes and emoji for log file
-        echo "[$timestamp] [${level^^}] ${message}" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> "$LOG_FILE"
-    fi
-}
-
-# Load configuration with validation
-load_config() {
-    local config_loaded=false
-    
-    if [[ -f "$CONFIG_FILE" ]]; then
-        if ! source "$CONFIG_FILE"; then
-            log "ERROR" "Failed to load configuration from $CONFIG_FILE"
-            return 1
-        fi
-        config_loaded=true
-    fi
-    
-    # Set defaults if not defined or validate existing values
-    SSH_PORT=${SSH_PORT:-22}
-    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || ((SSH_PORT < 1 || SSH_PORT > 65535)); then
-        log "ERROR" "Invalid SSH_PORT value: $SSH_PORT"
-        return 1
-    fi
-    
-    SSH_ALLOW_USERS=${SSH_ALLOW_USERS:-}
-    MFA_ENABLED=${MFA_ENABLED:-yes}
-    if [[ "${MFA_ENABLED,,}" != "yes" && "${MFA_ENABLED,,}" != "no" ]]; then
-        log "ERROR" "Invalid MFA_ENABLED value: $MFA_ENABLED (must be 'yes' or 'no')"
-        return 1
-    fi
-    
-    return 0
-}
-
-# Verify a specific user with improved error handling
-verify_user() {
-    local username="$1"
-    local status=0
-    
-    # Clean and validate username first
-    if [[ ! "$username" =~ ^[a-z][a-z0-9_-]*$ ]]; then
-        log "ERROR" "Invalid username format: $username"
-        return 1
-    fi
-    
-    # Check user exists
-    if ! id "$username" >/dev/null 2>&1; then
-        log "ERROR" "User $username does not exist"
-        return 1
-    fi
-    
-    # Check sudo group membership
-    if ! groups "$username" 2>/dev/null | grep -q '\bsudo\b'; then
-        log "ERROR" "User is not in sudo group"
+    # Check configuration file
+    if [[ ! -f "$DEFAULT_CONFIG" ]]; then
+        log "ERROR" "Configuration file missing: $DEFAULT_CONFIG"
         status=1
-    fi
-    
-    # Check SSH directory and keys with proper error handling
-    local ssh_dir="/home/${username}/.ssh"
-    local auth_keys="${ssh_dir}/authorized_keys"
-    
-    if [[ ! -d "$ssh_dir" ]]; then
-        log "ERROR" "SSH directory does not exist: $ssh_dir"
-        status=1
-    elif [[ "$(stat -c "%a" "$ssh_dir" 2>/dev/null)" != "700" ]]; then
-        log "ERROR" "Incorrect SSH directory permissions"
-        status=1
-    fi
-    
-    if [[ ! -f "$auth_keys" ]]; then
-        log "ERROR" "Authorized keys file does not exist: $auth_keys"
-        status=1
-    elif [[ "$(stat -c "%a" "$auth_keys" 2>/dev/null)" != "600" ]]; then
-        log "ERROR" "Incorrect authorized_keys file permissions"
-        status=1
-    fi
-    
-    # Check 2FA if enabled
-    if [[ "${MFA_ENABLED,,}" == "yes" ]]; then
-        if [[ ! -f "/home/${username}/.google_authenticator" ]]; then
-            log "ERROR" "2FA not configured for user"
-            status=1
-        elif ! grep -q "^auth.*pam_google_authenticator.so" /etc/pam.d/sshd 2>/dev/null; then
-            log "ERROR" "2FA PAM configuration incomplete"
+    else
+        # Verify config permissions
+        local config_perms
+        config_perms=$(stat -c "%a" "$DEFAULT_CONFIG")
+        if [[ "$config_perms" != "600" ]]; then
+            log "ERROR" "Invalid configuration file permissions: $config_perms (should be 600)"
             status=1
         fi
     fi
     
+    VERIFICATION_RESULTS["filesystem"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
     return $status
 }
 
-# Verify system services with timeout
-verify_services() {
+verify_packages() {
+    log "INFO" "Verifying required packages..."
     local status=0
-    local timeout_duration=5
+    local required_packages=(
+        "openssh-server"
+        "ufw"
+        "fail2ban"
+        "libpam-google-authenticator"
+    )
     
-    # Check SSH configuration
-    log "INFO" "Verifying SSH configuration..."
-    if ! timeout "$timeout_duration" sshd -t >/dev/null 2>&1; then
+    for pkg in "${required_packages[@]}"; do
+        if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+            log "ERROR" "Required package not installed: $pkg"
+            status=1
+        fi
+    done
+    
+    VERIFICATION_RESULTS["packages"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
+}
+
+verify_services() {
+    log "INFO" "Verifying service states..."
+    local status=0
+    
+    for service in "${REQUIRED_SERVICES[@]}"; do
+        if ! systemctl is-active --quiet "$service"; then
+            log "ERROR" "Required service not running: $service"
+            status=1
+        fi
+        if ! systemctl is-enabled --quiet "$service" 2>/dev/null; then
+            log "ERROR" "Required service not enabled: $service"
+            status=1
+        fi
+    done
+    
+    # Verify SSH configuration
+    if ! sshd -t >/dev/null 2>&1; then
         log "ERROR" "Invalid SSH configuration"
         status=1
     fi
     
-    # Check essential services
-    local services=("sshd" "fail2ban")
-    for service in "${services[@]}"; do
-        if ! command -v systemctl >/dev/null 2>&1; then
-            log "ERROR" "systemctl not available"
-            return 1
-        fi
-        
-        log "INFO" "Checking $service status..."
-        if ! timeout "$timeout_duration" systemctl is-active --quiet "$service"; then
-            log "ERROR" "$service is not running"
+    # Verify fail2ban jails
+    if ! fail2ban-client ping >/dev/null 2>&1; then
+        log "ERROR" "fail2ban service not responding"
+        status=1
+    elif ! fail2ban-client status sshd >/dev/null 2>&1; then
+        log "ERROR" "fail2ban SSH jail not configured"
+        status=1
+    fi
+    
+    # Verify firewall
+    if ! ufw status | grep -q "Status: active"; then
+        log "ERROR" "Firewall is not active"
+        status=1
+    fi
+    
+    VERIFICATION_RESULTS["services"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
+}
+
+verify_security_config() {
+    log "INFO" "Verifying security configurations..."
+    local status=0
+    
+    # Verify SSH hardening
+    local ssh_config="/etc/ssh/sshd_config"
+    local required_ssh_settings=(
+        "^PermitRootLogin no"
+        "^PasswordAuthentication no"
+        "^PubkeyAuthentication yes"
+        "^X11Forwarding no"
+    )
+    
+    for setting in "${required_ssh_settings[@]}"; do
+        if ! grep -q "$setting" "$ssh_config"; then
+            log "ERROR" "Missing SSH security setting: $setting"
             status=1
         fi
     done
     
-    # Check firewall
-    if command -v ufw >/dev/null 2>&1; then
-        log "INFO" "Checking firewall status..."
-        if ! timeout "$timeout_duration" ufw status | grep -q "Status: active"; then
-            log "ERROR" "Firewall is not active"
-            status=1
-        fi
-    else
-        log "ERROR" "UFW firewall not installed"
+    # Verify PAM configuration
+    if [[ ! -f "/etc/pam.d/sshd" ]]; then
+        log "ERROR" "PAM SSH configuration missing"
+        status=1
+    elif ! grep -q "^auth.*pam_google_authenticator.so" "/etc/pam.d/sshd"; then
+        log "ERROR" "2FA PAM configuration missing"
         status=1
     fi
     
+    # Verify sysctl security settings
+    local required_sysctl=(
+        "net.ipv4.conf.all.accept_redirects=0"
+        "net.ipv4.conf.all.secure_redirects=0"
+        "net.ipv4.conf.all.accept_source_route=0"
+        "kernel.sysrq=0"
+    )
+    
+    for setting in "${required_sysctl[@]}"; do
+        local key="${setting%=*}"
+        local value="${setting#*=}"
+        local actual
+        actual=$(sysctl -n "$key" 2>/dev/null)
+        if [[ "$actual" != "$value" ]]; then
+            log "ERROR" "Invalid sysctl setting: $key = $actual (should be $value)"
+            status=1
+        fi
+    done
+    
+    VERIFICATION_RESULTS["security_config"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
     return $status
 }
 
-# Main verification function
-verify_system() {
+verify_user() {
     local username="$1"
-    local success=true
+    log "INFO" "Verifying user configuration for: $username"
+    local status=0
     
-    # Check requirements first
-    if ! check_requirements; then
-        log "ERROR" "System requirements not met"
-        return 1
+    # Basic user verification
+    if ! id "$username" >/dev/null 2>&1; then
+        log "ERROR" "User does not exist: $username"
+        status=1
+    else
+        # Check sudo access
+        if ! groups "$username" | grep -q '\bsudo\b'; then
+            log "ERROR" "User not in sudo group: $username"
+            status=1
+        fi
+        
+        # Check SSH directory and keys
+        local ssh_dir="/home/$username/.ssh"
+        local auth_keys="$ssh_dir/authorized_keys"
+        
+        if [[ ! -d "$ssh_dir" ]]; then
+            log "ERROR" "SSH directory missing: $ssh_dir"
+            status=1
+        elif [[ "$(stat -c '%a' "$ssh_dir")" != "700" ]]; then
+            log "ERROR" "Invalid SSH directory permissions"
+            status=1
+        fi
+        
+        if [[ ! -f "$auth_keys" ]]; then
+            log "ERROR" "SSH authorized_keys missing: $auth_keys"
+            status=1
+        elif [[ "$(stat -c '%a' "$auth_keys")" != "600" ]]; then
+            log "ERROR" "Invalid authorized_keys permissions"
+            status=1
+        fi
+        
+        # Check 2FA setup
+        if [[ ! -f "/home/$username/.google_authenticator" ]]; then
+            log "ERROR" "2FA not configured for user"
+            status=1
+        elif [[ "$(stat -c '%a' "/home/$username/.google_authenticator")" != "400" ]]; then
+            log "ERROR" "Invalid 2FA file permissions"
+            status=1
+        fi
     fi
     
-    # Load and validate configuration
-    if ! load_config; then
-        log "ERROR" "Configuration validation failed"
-        return 1
+    VERIFICATION_RESULTS["user_config"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
+}
+
+generate_report() {
+    local report_file="/var/log/security-verification-report.txt"
+    local total=0
+    local passed=0
+    
+    {
+        echo "=== System Security Verification Report ==="
+        echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "System: $(uname -a)"
+        echo
+        
+        echo "=== Verification Results ==="
+        for check in "${!VERIFICATION_RESULTS[@]}"; do
+            echo "${check}: ${VERIFICATION_RESULTS[$check]}"
+            ((total++))
+            [[ "${VERIFICATION_RESULTS[$check]}" == "PASS" ]] && ((passed++))
+        done
+        echo
+        
+        echo "=== Summary ==="
+        echo "Total Checks: $total"
+        echo "Passed: $passed"
+        echo "Failed: $((total - passed))"
+        echo "Success Rate: $(( (passed * 100) / total ))%"
+        echo
+        
+        echo "=== System Status ==="
+        echo "Services:"
+        for service in "${REQUIRED_SERVICES[@]}"; do
+            systemctl status "$service" | grep -E "^[[:space:]]*(Active|Status):" || true
+        done
+        echo
+        
+        if [[ $passed -lt $total ]]; then
+            echo "=== Recommendations ==="
+            if [[ "${VERIFICATION_RESULTS[filesystem]:-FAIL}" == "FAIL" ]]; then
+                echo "- Check directory permissions and configuration files"
+            fi
+            if [[ "${VERIFICATION_RESULTS[packages]:-FAIL}" == "FAIL" ]]; then
+                echo "- Install missing required packages"
+            fi
+            if [[ "${VERIFICATION_RESULTS[services]:-FAIL}" == "FAIL" ]]; then
+                echo "- Verify service configurations and restart required services"
+            fi
+            if [[ "${VERIFICATION_RESULTS[security_config]:-FAIL}" == "FAIL" ]]; then
+                echo "- Review security settings in SSH, PAM, and sysctl"
+            fi
+            if [[ "${VERIFICATION_RESULTS[user_config]:-FAIL}" == "FAIL" ]]; then
+                echo "- Check user permissions, SSH keys, and 2FA setup"
+            fi
+        fi
+        
+    } > "$report_file"
+    
+    chmod 600 "$report_file"
+    log "INFO" "Verification report generated: $report_file"
+}
+
+main() {
+    local username="$1"
+    local exit_status=0
+    
+    # Check root access
+    if [[ $EUID -ne 0 ]]; then
+        error_exit "This script must be run as root"
     fi
     
-    # Core checks
+    # Validate username
+    if [[ ! "$username" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+        error_exit "Invalid username format: $username"
+    fi
+    
     log "INFO" "Starting system verification..."
     
-    if ! verify_services; then
-        log "ERROR" "Service verification failed"
-        success=false
-    fi
+    # Run all verifications
+    verify_filesystem || exit_status=1
+    verify_packages || exit_status=1
+    verify_services || exit_status=1
+    verify_security_config || exit_status=1
+    verify_user "$username" || exit_status=1
     
-    if ! verify_user "$username"; then
-        log "ERROR" "User verification failed"
-        success=false
-    fi
+    # Generate verification report
+    generate_report
     
-    if [ "$success" = true ]; then
+    if [[ $exit_status -eq 0 ]]; then
         log "SUCCESS" "All system verifications passed"
-        return 0
     else
-        log "ERROR" "System verification failed"
-        return 1
-    fi
-}
-
-# Main execution
-main() {
-    if [[ $# -lt 1 ]]; then
-        echo "Usage: $0 username" >&2
-        exit 1
+        log "ERROR" "System state verification failed"
     fi
     
-    # Ensure script is run as root
-    if [[ $EUID -ne 0 ]]; then
-        log "ERROR" "This script must be run as root"
-        exit 1
-    fi
-    
-    verify_system "$1"
+    return $exit_status
 }
 
-main "$@"
+# Check arguments
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <username>" >&2
+    exit 1
+fi
+
+main "$1"
