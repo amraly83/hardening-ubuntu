@@ -436,6 +436,41 @@ ensure_sudo_membership() {
     return 1
 }
 
+fix_sudo_auth() {
+    local username="$1"
+    log "INFO" "Fixing sudo authentication for $username..."
+    
+    # Reset sudo timestamp
+    sudo -K
+    
+    # Ensure user is in sudo group
+    usermod -aG sudo "$username"
+    
+    # Fix home directory permissions
+    chown -R "$username:$username" "/home/$username"
+    chmod 750 "/home/$username"
+    
+    # Ensure proper PAM setup
+    if ! grep -q "^@include common-auth" /etc/pam.d/sudo; then
+        echo "@include common-auth" >> /etc/pam.d/sudo
+    fi
+    
+    if ! grep -q "^@include common-account" /etc/pam.d/sudo; then
+        echo "@include common-account" >> /etc/pam.d/sudo
+    fi
+    
+    # Reset and create fresh sudoers entry
+    rm -f "/etc/sudoers.d/$username"
+    echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+    chmod 440 "/etc/sudoers.d/$username"
+    
+    # Reset PAM sessions
+    pkill -SIGHUP -u "$username" || true
+    
+    log "INFO" "Sudo authentication reset for $username"
+    return 0
+}
+
 # Script initialization
 init_script() {
     # Set error handling

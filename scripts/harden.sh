@@ -252,30 +252,69 @@ configure_sudo() {
     
     # Backup sudoers file
     backup_file "/etc/sudoers"
+    backup_file "/etc/pam.d/sudo"
     
-    # Create a specific sudoers file for user switching
-    cat > "/etc/sudoers.d/user-switching" << 'EOF'
-# Allow members of sudo group to switch users without password
-%sudo ALL=(ALL) NOPASSWD: /bin/su - [A-Za-z0-9]*
-%sudo ALL=(ALL) NOPASSWD: /usr/bin/su - [A-Za-z0-9]*
+    # Configure sudo PAM to handle passwords correctly
+    cat > "/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+auth       required      pam_unix.so
+auth       required      pam_env.so
+session    required      pam_env.so readenv=1 user_readenv=0
+session    required      pam_limits.so
+session    required      pam_unix.so
+session    required      pam_permit.so
+@include common-auth
+@include common-account
+@include common-session-noninteractive
+EOF
 
-# Allow sudo users to run sudo without password
-%sudo ALL=(ALL) NOPASSWD: /usr/bin/sudo -l
-%sudo ALL=(ALL) NOPASSWD: /usr/bin/sudo -v
+    # Create sudo group configuration
+    cat > "/etc/sudoers.d/sudo-group" << 'EOF'
+# Allow sudo group members to execute any command
+%sudo   ALL=(ALL:ALL) ALL
 
-# Defaults specific to sudo group
+# Do not require tty
 Defaults:%sudo !requiretty
-Defaults:%sudo timestamp_timeout=30
+
+# Set PATH for sudo users
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Configure password handling
+Defaults        env_reset
+Defaults        mail_badpass
+Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults        use_pty
+Defaults        timestamp_timeout=15
+EOF
+
+    chmod 440 "/etc/sudoers.d/sudo-group"
+    
+    # Create specific rules for user switching
+    cat > "/etc/sudoers.d/user-switching" << 'EOF'
+# Allow sudo users to switch between each other without re-entering password
+Defaults:%sudo !tty_tickets
+Defaults:%sudo timestamp_timeout=15
+
+# Keep environment variables needed for proper operation
+Defaults env_keep += "LANG LANGUAGE LINGUAS LC_* _XKB_CHARSET"
+Defaults env_keep += "HOME EDITOR SYSTEMD_EDITOR"
+Defaults env_keep += "XAUTHORITY DISPLAY SSH_AUTH_SOCK"
 EOF
 
     chmod 440 "/etc/sudoers.d/user-switching"
     
     # Validate sudoers configuration
-    if ! visudo -c; then
+    if ! visudo -c -f /etc/sudoers; then
         log "ERROR" "Invalid sudoers configuration"
+        rm -f "/etc/sudoers.d/sudo-group"
         rm -f "/etc/sudoers.d/user-switching"
         return 1
     fi
+    
+    # Fix permissions on important directories
+    chmod 755 /usr/bin/sudo
+    chmod 440 /etc/sudoers
+    chmod 750 /etc/sudoers.d
     
     log "SUCCESS" "Sudo configuration updated"
     return 0
