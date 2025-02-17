@@ -707,33 +707,3 @@ setup_sudo_access() {
     
     return 0
 }
-
-ensure_sudo_membership() {
-    local username="$1"
-    local status=0
-    
-    # Verify sudo group exists
-    if ! getent group sudo >/dev/null 2>&1; then
-        log "INFO" "Creating sudo group"
-        groupadd sudo || status=1
-    fi
-    
-    # Check current group membership
-    if ! groups "$username" | grep -q '\bsudo\b'; then
-        log "INFO" "Adding $username to sudo group"
-        usermod -aG sudo "$username"
-        
-        # Force group update through various methods
-        sg sudo -c "id" || true
-        newgrp sudo || true
-        su -s /bin/bash - "$username" -c "id" || true
-        
-        # Verify group membership again
-        if ! groups "$username" | grep -q '\bsudo\b'; then
-            log "ERROR" "Failed to add user to sudo group"
-            status=1
-        fi
-    fi
-    
-    return $status
-}

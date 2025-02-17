@@ -2,20 +2,30 @@
 # Enhanced SSH key setup script
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Determine script directory portably
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 source "${SCRIPT_DIR}/common.sh"
 
 setup_ssh_keys() {
     local username="$1"
     local home_dir
-    home_dir=$(getent passwd "$username" | cut -d: -f6)
+    
+    # Handle Windows paths
+    if [[ "$(uname -s)" == *"NT"* ]]; then
+        home_dir="/c/Users/${username}"
+    else
+        home_dir=$(getent passwd "$username" | cut -d: -f6)
+    fi
+    
     local ssh_dir="${home_dir}/.ssh"
     local auth_keys="${ssh_dir}/authorized_keys"
     local backup_suffix=".$(date +%Y%m%d_%H%M%S).bak"
 
-    # Verify user exists
-    if ! id -u "$username" >/dev/null 2>&1; then
-        error_exit "User $username does not exist"
+    # Verify user exists - skip on Windows
+    if [[ "$(uname -s)" != *"NT"* ]]; then
+        if ! id -u "$username" >/dev/null 2>&1; then
+            error_exit "User $username does not exist"
+        fi
     fi
 
     log "INFO" "Setting up SSH keys for user $username"
@@ -27,8 +37,11 @@ setup_ssh_keys() {
 
     # Create .ssh directory with secure permissions
     mkdir -p "$ssh_dir"
-    chmod 700 "$ssh_dir"
-    chown "$username:$username" "$ssh_dir"
+    
+    if [[ "$(uname -s)" != *"NT"* ]]; then
+        chmod 700 "$ssh_dir"
+        chown "$username:$username" "$ssh_dir"
+    fi
 
     # Prompt for public key
     local pub_key=""
@@ -183,17 +196,37 @@ EOF
 
 verify_ssh_access() {
     local username="$1"
+    
+    # Skip verification on Windows
+    if [[ "$(uname -s)" == *"NT"* ]]; then
+        log "INFO" "Running on Windows - skipping SSH access verification"
+        return 0
+    fi
+    
     local home_dir
     home_dir=$(getent passwd "$username" | cut -d: -f6)
     
-    # Test SSH access locally
-    if ! timeout 10 ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$username@localhost" true; then
+    # Check SSH key files exist
+    if ! stat "${home_dir}/.ssh" >/dev/null 2>&1 || \
+       ! stat "${home_dir}/.ssh/authorized_keys" >/dev/null 2>&1; then
+        log "ERROR" "SSH directory or authorized_keys file not found"
         return 1
     fi
     
-    # Verify key permissions
+    # Test SSH connection if SSH client is available
+    if command -v ssh >/dev/null 2>&1; then
+        if ! timeout 10 ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$username@localhost" true; then
+            log "ERROR" "Failed SSH connection test"
+            return 1
+        fi
+    else
+        log "WARNING" "SSH client not found - skipping connection test"
+    fi
+    
+    # Verify permissions on Unix-like systems
     if [[ "$(stat -c "%a" "${home_dir}/.ssh")" != "700" ]] || \
        [[ "$(stat -c "%a" "${home_dir}/.ssh/authorized_keys")" != "600" ]]; then
+        log "ERROR" "Incorrect SSH directory or key file permissions"
         return 1
     fi
     
