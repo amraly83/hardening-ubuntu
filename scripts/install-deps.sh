@@ -1,118 +1,220 @@
 #!/bin/bash
-# Install required dependencies for hardening scripts
+# Package dependency management and installation
 set -euo pipefail
 
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_BLUE='\033[1;34m'
-readonly COLOR_RESET='\033[0m'
-
-# Required packages
-REQUIRED_PACKAGES=(
-    "sudo"
-    "openssh-server"
-    "ufw"
-    "fail2ban"
-    "unattended-upgrades"
-    "dos2unix"
-    "libpam-google-authenticator"
-    "jq"
-    "expect"
-    "timeout"
-    "file"
-    "bc"
-    "curl"
+# Required package definitions with versions
+declare -A REQUIRED_PACKAGES=(
+    ["openssh-server"]="latest"
+    ["libpam-google-authenticator"]="latest"
+    ["ufw"]="latest"
+    ["fail2ban"]="latest"
+    ["sudo"]="latest"
+    ["git"]="latest"
+    ["bc"]="latest"
+    ["jq"]="latest"
 )
 
-# Function to check if package is installed
-is_package_installed() {
-    dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+# Optional but recommended packages
+declare -A OPTIONAL_PACKAGES=(
+    ["unattended-upgrades"]="latest"
+    ["apt-listchanges"]="latest"
+    ["postfix"]="latest"
+    ["apparmor"]="latest"
+    ["auditd"]="latest"
+)
+
+install_dependencies() {
+    local mode="${1:-required}"
+    local install_log="/var/log/hardening-install.log"
+    
+    log "INFO" "Installing dependencies (mode: $mode)..."
+    
+    # Check if apt is locked
+    if check_apt_lock; then
+        error_exit "APT is locked. Please try again later."
+    fi
+    
+    # Update package lists
+    if ! DEBIAN_FRONTEND=noninteractive apt-get update >> "$install_log" 2>&1; then
+        error_exit "Failed to update package lists"
+    fi
+    
+    # Install required packages
+    install_package_group "Required" REQUIRED_PACKAGES[@] "$install_log"
+    
+    # Install optional packages if requested
+    if [[ "$mode" == "full" ]]; then
+        install_package_group "Optional" OPTIONAL_PACKAGES[@] "$install_log"
+    fi
+    
+    # Verify installations
+    verify_installations
+    
+    log "SUCCESS" "Package installation completed successfully"
 }
 
-# Function to install a package with progress
-install_package() {
-    local package="$1"
-    echo -n "Installing ${package}... "
+install_package_group() {
+    local group_name="$1"
+    local -n packages="$2"
+    local log_file="$3"
     
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" >/dev/null 2>&1; then
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-        return 0
-    else
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        return 1
-    fi
-}
-
-# Main installation function
-main() {
-    local failed=0
-    local installed=0
-    local skipped=0
+    log "INFO" "Installing $group_name packages..."
     
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${COLOR_RED}Error: This script must be run as root${COLOR_RESET}"
-        exit 1
-    fi
-    
-    # Check if running on Ubuntu
-    if ! grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
-        echo -e "${COLOR_YELLOW}Warning: This script is designed for Ubuntu${COLOR_RESET}"
-        echo "Continue anyway? [y/N] "
-        read -r response
-        if [[ ! "$response" =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
-    
-    echo -e "${COLOR_BLUE}=== Installing Required Dependencies ===${COLOR_RESET}"
-    
-    # Update package lists first
-    echo "Updating package lists..."
-    if ! apt-get update >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}Failed to update package lists${COLOR_RESET}"
-        exit 1
-    fi
-    
-    # Install packages
-    for package in "${REQUIRED_PACKAGES[@]}"; do
-        if is_package_installed "$package"; then
-            echo -e "Package $package is ${COLOR_GREEN}already installed${COLOR_RESET}"
-            ((skipped++))
-            continue
+    for pkg in "${!packages[@]}"; do
+        local version="${packages[$pkg]}"
+        local install_cmd="DEBIAN_FRONTEND=noninteractive apt-get install -y"
+        
+        if [[ "$version" != "latest" ]]; then
+            install_cmd+=" $pkg=$version"
+        else
+            install_cmd+=" $pkg"
         fi
         
-        if install_package "$package"; then
-            ((installed++))
-        else
-            ((failed++))
-            echo -e "${COLOR_RED}Failed to install $package${COLOR_RESET}"
+        log "INFO" "Installing $pkg..."
+        if ! eval "$install_cmd" >> "$log_file" 2>&1; then
+            log "ERROR" "Failed to install $pkg"
+            continue
+        fi
+    done
+}
+
+verify_installations() {
+    local failed=false
+    
+    log "INFO" "Verifying package installations..."
+    
+    # Check required packages
+    for pkg in "${!REQUIRED_PACKAGES[@]}"; do
+        if ! dpkg -l "$pkg" | grep -q "^ii"; then
+            log "ERROR" "Required package not installed: $pkg"
+            failed=true
         fi
     done
     
-    # Fix any potential dependency issues
-    echo "Fixing potential dependency issues..."
-    apt-get install -f -y >/dev/null 2>&1 || true
+    # Configure and verify services
+    verify_service_configuration || failed=true
     
-    # Print summary
-    echo -e "\n${COLOR_BLUE}=== Installation Summary ===${COLOR_RESET}"
-    echo -e "Packages installed: ${COLOR_GREEN}$installed${COLOR_RESET}"
-    echo -e "Packages skipped: ${COLOR_YELLOW}$skipped${COLOR_RESET}"
-    if [[ $failed -gt 0 ]]; then
-        echo -e "Packages failed: ${COLOR_RED}$failed${COLOR_RESET}"
-        echo -e "\n${COLOR_RED}Some packages failed to install. Please check the errors above.${COLOR_RESET}"
-        return 1
+    if [[ "$failed" == "true" ]]; then
+        error_exit "Package verification failed"
     fi
-    
-    echo -e "\n${COLOR_GREEN}All required dependencies installed successfully${COLOR_RESET}"
-    return 0
 }
 
-# Run main function
-main "$@"
+verify_service_configuration() {
+    local failed=false
+    
+    # Check SSH service
+    if ! systemctl is-enabled ssh >/dev/null 2>&1; then
+        systemctl enable ssh
+    fi
+    if ! systemctl is-active --quiet ssh; then
+        systemctl start ssh || failed=true
+    fi
+    
+    # Check fail2ban
+    if ! systemctl is-enabled fail2ban >/dev/null 2>&1; then
+        systemctl enable fail2ban
+    fi
+    if ! systemctl is-active --quiet fail2ban; then
+        systemctl start fail2ban || failed=true
+    fi
+    
+    # Check UFW
+    if ! systemctl is-enabled ufw >/dev/null 2>&1; then
+        systemctl enable ufw
+    fi
+    if ! ufw status | grep -q "Status: active"; then
+        ufw --force enable || failed=true
+    fi
+    
+    # Check unattended-upgrades if installed
+    if dpkg -l unattended-upgrades | grep -q "^ii"; then
+        if ! systemctl is-enabled unattended-upgrades >/dev/null 2>&1; then
+            systemctl enable unattended-upgrades
+        fi
+        if ! systemctl is-active --quiet unattended-upgrades; then
+            systemctl start unattended-upgrades || failed=true
+        fi
+    fi
+    
+    return $([ "$failed" == "false" ])
+}
+
+check_apt_lock() {
+    # Check for apt/dpkg locks
+    lsof /var/lib/dpkg/lock >/dev/null 2>&1 || \
+    lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+    lsof /var/cache/apt/archives/lock >/dev/null 2>&1
+}
+
+cleanup_packages() {
+    log "INFO" "Cleaning up package installation..."
+    
+    # Remove unused packages
+    apt-get autoremove -y
+    
+    # Clean apt cache
+    apt-get clean
+    
+    # Remove old config files
+    dpkg --purge $(dpkg -l | awk '/^rc/ {print $2}')
+}
+
+show_package_status() {
+    echo "=== Package Installation Status ==="
+    echo
+    echo "Required Packages:"
+    for pkg in "${!REQUIRED_PACKAGES[@]}"; do
+        if dpkg -l "$pkg" | grep -q "^ii"; then
+            echo "✓ $pkg (Installed)"
+        else
+            echo "✗ $pkg (Not installed)"
+        fi
+    done
+    
+    echo
+    echo "Optional Packages:"
+    for pkg in "${!OPTIONAL_PACKAGES[@]}"; do
+        if dpkg -l "$pkg" | grep -q "^ii"; then
+            echo "✓ $pkg (Installed)"
+        else
+            echo "- $pkg (Not installed)"
+        fi
+    done
+    
+    echo
+    echo "Service Status:"
+    services=("ssh" "fail2ban" "ufw" "unattended-upgrades")
+    for service in "${services[@]}"; do
+        if systemctl is-active --quiet "$service"; then
+            echo "✓ $service (Running)"
+        else
+            echo "✗ $service (Not running)"
+        fi
+    done
+}
+
+# Main execution
+case "${1:-}" in
+    "install")
+        install_dependencies "${2:-required}"
+        ;;
+    "verify")
+        verify_installations
+        ;;
+    "cleanup")
+        cleanup_packages
+        ;;
+    "status")
+        show_package_status
+        ;;
+    *)
+        echo "Usage: $0 <install|verify|cleanup|status> [mode]"
+        echo "Modes:"
+        echo "  required  Install only required packages (default)"
+        echo "  full      Install all packages including optional ones"
+        exit 1
+        ;;
+esac

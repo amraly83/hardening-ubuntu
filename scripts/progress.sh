@@ -1,208 +1,249 @@
 #!/bin/bash
-# Track setup progress with cross-platform compatibility
+# Progress tracking and state management system
 set -euo pipefail
 
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Progress tracking file
 PROGRESS_FILE="/var/lib/server-hardening/progress.json"
+PROGRESS_LOG="/var/log/hardening-progress.log"
 
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_BLUE='\033[1;34m'
-readonly COLOR_RESET='\033[0m'
+# Progress stages and their dependencies
+declare -A STAGES=(
+    ["preflight"]=""
+    ["backup"]="preflight"
+    ["user_setup"]="backup"
+    ["ssh_config"]="user_setup"
+    ["2fa_setup"]="ssh_config"
+    ["firewall"]="preflight"
+    ["system_hardening"]="firewall"
+    ["monitoring"]="system_hardening"
+    ["verification"]="monitoring"
+)
 
 # Initialize progress tracking
 init_progress() {
     mkdir -p "$(dirname "$PROGRESS_FILE")"
     
-    if [[ ! -f "$PROGRESS_FILE" ]]; then
-        cat > "$PROGRESS_FILE" << EOF
+    # Create initial progress state
+    cat > "$PROGRESS_FILE" << EOF
 {
-    "steps": {
-        "prerequisites": "pending",
-        "admin_user": "pending",
-        "ssh_keys": "pending",
-        "2fa": "pending",
-        "system_hardening": "pending"
+    "start_time": "$(date --iso-8601=seconds)",
+    "hostname": "$(hostname)",
+    "stages": {
+        "preflight": {"status": "pending", "timestamp": null},
+        "backup": {"status": "pending", "timestamp": null},
+        "user_setup": {"status": "pending", "timestamp": null},
+        "ssh_config": {"status": "pending", "timestamp": null},
+        "2fa_setup": {"status": "pending", "timestamp": null},
+        "firewall": {"status": "pending", "timestamp": null},
+        "system_hardening": {"status": "pending", "timestamp": null},
+        "monitoring": {"status": "pending", "timestamp": null},
+        "verification": {"status": "pending", "timestamp": null}
     },
-    "current_step": "prerequisites",
-    "last_updated": "",
-    "username": ""
+    "current_stage": null,
+    "completed": false,
+    "error": null
 }
 EOF
-        chmod 600 "$PROGRESS_FILE"
-    fi
+    
+    chmod 600 "$PROGRESS_FILE"
 }
 
-# Update progress for a step
-track_progress() {
-    local step="$1"
+# Update stage status
+update_stage() {
+    local stage="$1"
     local status="$2"
     local timestamp
-    timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+    timestamp=$(date --iso-8601=seconds)
     
-    # Ensure temp file inherits permissions
+    # Validate stage
+    if [[ ! " ${!STAGES[@]} " =~ " $stage " ]]; then
+        error_exit "Invalid stage: $stage"
+    }
+    
+    # Check dependencies
+    local deps="${STAGES[$stage]}"
+    if [[ -n "$deps" ]]; then
+        for dep in $deps; do
+            if ! check_stage_complete "$dep"; then
+                error_exit "Dependency not met: $stage requires $dep"
+            }
+        done
+    fi
+    
+    # Update progress file
     local temp_file
     temp_file=$(mktemp)
-    chmod 600 "$temp_file"
-    
-    jq --arg step "$step" \
+    jq --arg stage "$stage" \
        --arg status "$status" \
        --arg time "$timestamp" \
-       '.steps[$step] = $status | .last_updated = $time' \
-       "$PROGRESS_FILE" > "$temp_file" && mv "$temp_file" "$PROGRESS_FILE"
-}
-
-# Update current step
-set_current_step() {
-    local step="$1"
-    local temp_file
-    temp_file=$(mktemp)
-    chmod 600 "$temp_file"
+       '.stages[$stage].status = $status |
+        .stages[$stage].timestamp = $time |
+        if $status == "in_progress" then .current_stage = $stage else . end' \
+        "$PROGRESS_FILE" > "$temp_file"
+    mv "$temp_file" "$PROGRESS_FILE"
     
-    jq --arg step "$step" \
-       '.current_step = $step' \
-       "$PROGRESS_FILE" > "$temp_file" && mv "$temp_file" "$PROGRESS_FILE"
+    # Log progress
+    log_progress "$stage" "$status"
 }
 
-# Set username in progress
-set_username() {
-    local username="$1"
-    local temp_file
-    temp_file=$(mktemp)
-    chmod 600 "$temp_file"
+# Check if stage is complete
+check_stage_complete() {
+    local stage="$1"
+    local status
     
-    jq --arg username "$username" \
-       '.username = $username' \
-       "$PROGRESS_FILE" > "$temp_file" && mv "$temp_file" "$PROGRESS_FILE"
+    status=$(jq -r --arg stage "$stage" '.stages[$stage].status' "$PROGRESS_FILE")
+    [[ "$status" == "complete" ]]
 }
 
-# Get current progress
-get_progress() {
-    if [[ -f "$PROGRESS_FILE" ]]; then
-        cat "$PROGRESS_FILE"
-    else
-        echo "{}"
-    fi
+# Log progress update
+log_progress() {
+    local stage="$1"
+    local status="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    echo "[$timestamp] Stage '$stage' - $status" >> "$PROGRESS_LOG"
 }
 
-# Check if we should resume from last step
-resume_from_last() {
-    if [[ -f "$PROGRESS_FILE" ]]; then
-        local current_step
-        current_step=$(jq -r '.current_step' "$PROGRESS_FILE")
-        if [[ "$current_step" != "null" && "$current_step" != "prerequisites" ]]; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# Display progress nicely
+# Display progress summary
 show_progress() {
-    echo -e "\n${COLOR_BLUE}=== Setup Progress ===${COLOR_RESET}"
+    local total_stages=${#STAGES[@]}
+    local completed_stages=0
+    local current_stage
     
-    local status
-    while IFS="=" read -r step status; do
-        status="${status//\"/}"
-        printf "%-20s" "$step"
+    echo "=== Hardening Progress ==="
+    
+    for stage in "${!STAGES[@]}"; do
+        local status
+        status=$(jq -r --arg stage "$stage" '.stages[$stage].status' "$PROGRESS_FILE")
+        local timestamp
+        timestamp=$(jq -r --arg stage "$stage" '.stages[$stage].timestamp // "N/A"' "$PROGRESS_FILE")
+        
         case "$status" in
-            "completed") echo -e "${COLOR_GREEN}✓ Completed${COLOR_RESET}" ;;
-            "failed") echo -e "${COLOR_RED}✗ Failed${COLOR_RESET}" ;;
-            "pending") echo -e "${COLOR_YELLOW}⋯ Pending${COLOR_RESET}" ;;
-            "verifying") echo -e "${COLOR_BLUE}⟳ Verifying${COLOR_RESET}" ;;
-            *) echo -e "? Unknown" ;;
+            "complete")
+                echo "[✓] $stage"
+                ((completed_stages++))
+                ;;
+            "in_progress")
+                echo "[*] $stage (Current)"
+                current_stage="$stage"
+                ;;
+            "failed")
+                echo "[✗] $stage"
+                ;;
+            *)
+                echo "[ ] $stage"
+                ;;
         esac
-    done < <(jq -r '.steps | to_entries | .[] | "\(.key)=\(.value)"' "$PROGRESS_FILE")
+        
+        if [[ "$timestamp" != "N/A" ]]; then
+            echo "    Last update: $timestamp"
+        fi
+    done
     
-    local last_updated
-    last_updated=$(jq -r '.last_updated' "$PROGRESS_FILE")
-    if [[ -n "$last_updated" && "$last_updated" != "null" ]]; then
-        echo -e "\nLast updated: $last_updated"
-    fi
-    
+    # Show progress percentage
+    local progress=$((completed_stages * 100 / total_stages))
     echo
-}
-
-# Clear progress (for testing or reset)
-clear_progress() {
-    rm -f "$PROGRESS_FILE"
-    init_progress
-}
-
-# Check if a step is completed
-is_step_completed() {
-    local step="$1"
-    local status
+    echo "Overall Progress: $progress% ($completed_stages/$total_stages stages complete)"
     
-    if [[ ! -f "$PROGRESS_FILE" ]]; then
-        return 1
+    if [[ -n "${current_stage:-}" ]]; then
+        echo "Current Stage: $current_stage"
     fi
-    
-    status=$(jq -r ".steps[\"$step\"]" "$PROGRESS_FILE")
-    [[ "$status" == "completed" ]]
 }
 
-# Get username from progress
-get_username() {
+# Check if all stages are complete
+is_hardening_complete() {
+    local completed
+    completed=$(jq -r '.completed' "$PROGRESS_FILE")
+    [[ "$completed" == "true" ]]
+}
+
+# Save error state
+save_error() {
+    local error_msg="$1"
+    local stage="${2:-}"
+    local timestamp
+    timestamp=$(date --iso-8601=seconds)
+    
+    local temp_file
+    temp_file=$(mktemp)
+    
+    jq --arg error "$error_msg" \
+       --arg time "$timestamp" \
+       --arg stage "$stage" \
+       '. * {
+           "error": {
+               "message": $error,
+               "timestamp": $time,
+               "stage": $stage
+           }
+       }' "$PROGRESS_FILE" > "$temp_file"
+    mv "$temp_file" "$PROGRESS_FILE"
+    
+    log "ERROR" "Error in stage $stage: $error_msg"
+}
+
+# Reset progress tracking
+reset_progress() {
     if [[ -f "$PROGRESS_FILE" ]]; then
-        jq -r '.username' "$PROGRESS_FILE"
+        local backup_file="${PROGRESS_FILE}.$(date +%Y%m%d_%H%M%S).bak"
+        mv "$PROGRESS_FILE" "$backup_file"
+        log "INFO" "Previous progress backed up to: $backup_file"
     fi
+    
+    init_progress
+    log "INFO" "Progress tracking reset"
 }
 
-# Verify step completion
-verify_step_completion() {
-    local step="$1"
-    local username="$2"
+# Export stage completion status
+export_progress() {
+    local export_file="${1:-/var/lib/server-hardening/progress-export.json}"
     
-    case "$step" in
-        "admin_user")
-            # Verify admin user setup
-            if ! id "$username" >/dev/null 2>&1; then
-                return 1
-            fi
-            if ! groups "$username" | grep -q '\bsudo\b'; then
-                return 1
-            fi
-            ;;
-        "ssh_keys")
-            # Verify SSH key setup
-            if [[ ! -f "/home/${username}/.ssh/authorized_keys" ]]; then
-                return 1
-            fi
-            ;;
-        "2fa")
-            # Verify 2FA setup if enabled
-            if [[ -f "/home/${username}/.google_authenticator" ]]; then
-                if ! grep -q "auth.*pam_google_authenticator.so" /etc/pam.d/sshd 2>/dev/null; then
-                    return 1
-                fi
-            fi
-            ;;
-        *)
-            # Unknown step
-            return 1
-            ;;
-    esac
+    jq '{
+        summary: {
+            start_time: .start_time,
+            completed_stages: [.stages | to_entries[] | select(.value.status == "complete") | .key],
+            current_stage: .current_stage,
+            total_progress: (.stages | to_entries | map(select(.value.status == "complete")) | length) * 100 / (.stages | length)
+        },
+        stages: .stages,
+        error: .error
+    }' "$PROGRESS_FILE" > "$export_file"
     
-    return 0
+    chmod 644 "$export_file"
 }
 
-# Export functions
-export -f track_progress
-export -f show_progress
-export -f set_current_step
-export -f set_username
-export -f get_progress
-export -f resume_from_last
-export -f is_step_completed
-export -f get_username
-export -f verify_step_completion
-
-# Initialize progress file if it doesn't exist
-init_progress
+# Main execution
+case "${1:-}" in
+    "init")
+        init_progress
+        ;;
+    "update")
+        if [[ $# -lt 3 ]]; then
+            echo "Usage: $0 update <stage> <status>"
+            exit 1
+        fi
+        update_stage "$2" "$3"
+        ;;
+    "show")
+        show_progress
+        ;;
+    "reset")
+        reset_progress
+        ;;
+    "export")
+        export_progress "${2:-}"
+        ;;
+    *)
+        echo "Usage: $0 <init|update|show|reset|export> [args...]"
+        echo "Examples:"
+        echo "  $0 init                    # Initialize progress tracking"
+        echo "  $0 update preflight complete  # Update stage status"
+        echo "  $0 show                    # Show current progress"
+        echo "  $0 reset                   # Reset progress tracking"
+        echo "  $0 export output.json      # Export progress data"
+        exit 1
+        ;;
+esac

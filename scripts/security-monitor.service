@@ -1,0 +1,29 @@
+[Unit]
+Description=Security Monitoring Service
+After=network.target sshd.service fail2ban.service
+Wants=fail2ban.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/monitor-security.sh --daemon
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/security-monitor.log
+StandardError=append:/var/log/security-monitor.error.log
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

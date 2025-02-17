@@ -1,5 +1,5 @@
 #!/bin/bash
-# Standalone verification script for system hardening
+# Comprehensive system verification script
 set -euo pipefail
 
 # Fix line endings for this script first
@@ -192,49 +192,173 @@ verify_services() {
     return $status
 }
 
-# Main verification function
-main() {
-    if [[ $# -ne 1 ]]; then
-        log "ERROR" "Usage: $0 username"
-        exit 1
-    fi
-    
+verify_system() {
     local username="$1"
-    local all_passed=0
+    local success=true
     
-    echo -e "\n${COLOR_HIGHLIGHT}=== System Verification Starting ===${COLOR_RESET}\n"
-    log "INFO" "Starting system verification..."
-    
-    # Load configuration
-    load_config
-    
-    # Clean username and verify
-    username=$(echo "$username" | tr -cd 'a-z0-9_-')
-    echo -e "\n${COLOR_PROMPT}>>> Verifying user: ${COLOR_HIGHLIGHT}$username${COLOR_RESET}\n"
-    verify_user "$username" || all_passed=1
-    
-    echo -e "\n${COLOR_PROMPT}>>> Verifying system services${COLOR_RESET}\n"
-    verify_services || all_passed=1
-    
-    # Final status
-    echo
-    if [[ $all_passed -eq 0 ]]; then
-        echo -e "${COLOR_SUCCESS}✅ All verifications passed${COLOR_RESET}"
-        echo -e "${COLOR_SUCCESS}✅ System verification completed successfully${COLOR_RESET}"
-    else
-        echo -e "${COLOR_WARNING}⚠️  Some verifications failed${COLOR_RESET}"
-        echo -e "${COLOR_WARNING}⚠️  System verification completed with warnings${COLOR_RESET}"
+    # Core Service Checks
+    echo "=== Verifying Core Services ==="
+    services=("sshd" "fail2ban" "ufw" "unattended-upgrades")
+    for service in "${services[@]}"; do
+        if ! systemctl is-active --quiet "$service"; then
+            log "ERROR" "Service $service is not running"
+            success=false
+        fi
+    done
+
+    # SSH Configuration
+    echo "=== Verifying SSH Configuration ==="
+    if ! sshd -t; then
+        log "ERROR" "SSH configuration is invalid"
+        success=false
     fi
-    echo
-    
-    return $all_passed
+
+    # Firewall Status
+    echo "=== Verifying Firewall Rules ==="
+    if ! ufw status | grep -q "Status: active"; then
+        log "ERROR" "Firewall is not active"
+        success=false
+    fi
+
+    # File Permissions
+    echo "=== Verifying Critical File Permissions ==="
+    files_to_check=(
+        "/etc/ssh/sshd_config:600"
+        "/etc/sudoers:440"
+        "/etc/sudoers.d:750"
+    )
+    for entry in "${files_to_check[@]}"; do
+        file="${entry%:*}"
+        perm="${entry#*:}"
+        if ! check_file_permissions "$file" "$perm"; then
+            log "ERROR" "Incorrect permissions on $file"
+            success=false
+        fi
+    done
+
+    # Network Security
+    echo "=== Verifying Network Security ==="
+    if ! check_network_security; then
+        log "ERROR" "Network security checks failed"
+        success=false
+    fi
+
+    # User Security
+    echo "=== Verifying User Security ==="
+    if ! verify_user_security "$username"; then
+        log "ERROR" "User security checks failed"
+        success=false
+    fi
+
+    # Automatic Updates
+    echo "=== Verifying Automatic Updates ==="
+    if ! check_automatic_updates; then
+        log "WARNING" "Automatic updates may not be properly configured"
+    fi
+
+    # Service Configurations
+    echo "=== Verifying Service Configurations ==="
+    if ! verify_service_configs; then
+        log "ERROR" "Service configuration validation failed"
+        success=false
+    fi
+
+    # Return Results
+    if [ "$success" = true ]; then
+        log "SUCCESS" "All system verifications passed"
+        return 0
+    else
+        log "ERROR" "Some system verifications failed"
+        return 1
+    fi
 }
 
-# Check arguments
-if [[ $# -ne 1 ]]; then
-    echo -e "${COLOR_ERROR}Usage: $0 username${COLOR_RESET}"
+check_file_permissions() {
+    local file="$1"
+    local expected_perm="$2"
+    local actual_perm
+
+    if [[ ! -e "$file" ]]; then
+        return 1
+    fi
+
+    actual_perm=$(stat -c "%a" "$file")
+    [[ "$actual_perm" == "$expected_perm" ]]
+}
+
+check_network_security() {
+    # Check common network security settings
+    local sysctl_params=(
+        "net.ipv4.conf.all.accept_redirects=0"
+        "net.ipv4.conf.all.secure_redirects=0"
+        "net.ipv4.conf.all.accept_source_route=0"
+        "net.ipv4.tcp_syncookies=1"
+    )
+
+    for param in "${sysctl_params[@]}"; do
+        key="${param%=*}"
+        expected="${param#*=}"
+        actual=$(sysctl -n "$key" 2>/dev/null || echo "NOT_FOUND")
+        
+        if [[ "$actual" != "$expected" ]]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+verify_user_security() {
+    local username="$1"
+    
+    # Check user exists and is in sudo group
+    if ! id "$username" >/dev/null 2>&1 || ! groups "$username" | grep -q "\bsudo\b"; then
+        return 1
+    fi
+
+    # Check SSH directory permissions
+    local ssh_dir="/home/$username/.ssh"
+    if [[ -d "$ssh_dir" ]]; then
+        if [[ "$(stat -c "%a" "$ssh_dir")" != "700" ]]; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+check_automatic_updates() {
+    # Check if unattended-upgrades is installed and configured
+    if ! dpkg -l | grep -q "^ii.*unattended-upgrades"; then
+        return 1
+    fi
+
+    # Verify configuration exists
+    if [[ ! -f "/etc/apt/apt.conf.d/50unattended-upgrades" ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+verify_service_configs() {
+    # Check fail2ban configuration
+    if ! fail2ban-client ping >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Check SSH Protocol version
+    if ! grep -q "^Protocol 2" /etc/ssh/sshd_config; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Main execution
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 username"
     exit 1
 fi
 
-# Run main function
-main "$1"
+verify_system "$1"

@@ -1,201 +1,210 @@
 #!/bin/bash
-# Test 2FA setup and functionality for admin user
+# Automated 2FA testing script
 set -euo pipefail
 
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
-
-# Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Source common functions
-if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
-    sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
-    source "${SCRIPT_DIR}/common.sh"
-fi
+TEST_USER="test2fa"
+TEST_PASS="Test2FA!$(date +%s)"
+TEST_LOG="/var/log/2fa-test.log"
 
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_CYAN='\033[1;36m'
-readonly COLOR_RESET='\033[0m'
-
-# Test Google Authenticator setup
-test_ga_setup() {
-    local username="$1"
-    local ga_file="/home/${username}/.google_authenticator"
+test_2fa_setup() {
+    local success=true
     
-    echo -n "Testing Google Authenticator setup... "
+    log "INFO" "Starting 2FA testing suite..."
     
-    # Check if GA file exists and has content
-    if [[ ! -f "$ga_file" ]] || [[ ! -s "$ga_file" ]]; then
-        echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-        echo "Google Authenticator file missing or empty"
+    # Create test environment
+    setup_test_env || return 1
+    
+    # Run test cases
+    test_pam_configuration || success=false
+    test_ssh_configuration || success=false
+    test_google_authenticator || success=false
+    test_authentication_flow || success=false
+    
+    # Cleanup
+    cleanup_test_env
+    
+    # Generate test report
+    generate_test_report "$success"
+    
+    return $([ "$success" == "true" ])
+}
+
+setup_test_env() {
+    log "INFO" "Setting up test environment..."
+    
+    # Create test user
+    useradd -m -s /bin/bash "$TEST_USER" || return 1
+    echo "$TEST_USER:$TEST_PASS" | chpasswd
+    
+    # Add to sudo group for testing
+    usermod -aG sudo "$TEST_USER"
+    
+    # Create SSH directory
+    mkdir -p "/home/$TEST_USER/.ssh"
+    chmod 700 "/home/$TEST_USER/.ssh"
+    chown "$TEST_USER:$TEST_USER" "/home/$TEST_USER/.ssh"
+    
+    return 0
+}
+
+test_pam_configuration() {
+    log "INFO" "Testing PAM configuration..."
+    
+    # Check PAM module installation
+    if ! dpkg -l libpam-google-authenticator >/dev/null 2>&1; then
+        log "ERROR" "Google Authenticator PAM module not installed"
+        return 1
+    fi
+    
+    # Verify PAM configuration
+    local pam_file="/etc/pam.d/sshd"
+    if ! grep -q "auth required pam_google_authenticator.so" "$pam_file"; then
+        log "ERROR" "PAM configuration missing Google Authenticator"
+        return 1
+    fi
+    
+    # Test PAM module functionality
+    if ! pamtester -v sshd "$TEST_USER" authenticate 2>/dev/null; then
+        log "ERROR" "PAM authentication test failed"
+        return 1
+    fi
+    
+    return 0
+}
+
+test_ssh_configuration() {
+    log "INFO" "Testing SSH configuration..."
+    
+    # Verify SSH configuration
+    local config_file="/etc/ssh/sshd_config"
+    local required_settings=(
+        "ChallengeResponseAuthentication yes"
+        "UsePAM yes"
+        "AuthenticationMethods publickey,keyboard-interactive"
+    )
+    
+    for setting in "${required_settings[@]}"; do
+        if ! grep -q "^$setting" "$config_file"; then
+            log "ERROR" "Missing SSH configuration: $setting"
+            return 1
+        fi
+    done
+    
+    # Test SSH service
+    if ! systemctl is-active --quiet sshd; then
+        log "ERROR" "SSH service not running"
+        return 1
+    fi
+    
+    return 0
+}
+
+test_google_authenticator() {
+    log "INFO" "Testing Google Authenticator setup..."
+    
+    # Generate test configuration
+    su - "$TEST_USER" -c "google-authenticator -t -d -f -r 3 -R 30 -w 3" || {
+        log "ERROR" "Failed to initialize Google Authenticator"
+        return 1
+    }
+    
+    # Verify configuration file
+    if [[ ! -f "/home/$TEST_USER/.google_authenticator" ]]; then
+        log "ERROR" "Google Authenticator configuration file not created"
         return 1
     fi
     
     # Check file permissions
-    local perms
-    perms=$(stat -c "%a" "$ga_file")
-    if [[ "$perms" != "400" ]]; then
-        echo -e "${COLOR_YELLOW}Warning${COLOR_RESET}"
-        echo "Incorrect permissions on GA file: $perms (fixing...)"
-        chmod 400 "$ga_file"
-        chown "${username}:${username}" "$ga_file"
-    else
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
+    local file_perms
+    file_perms=$(stat -c '%a' "/home/$TEST_USER/.google_authenticator")
+    if [[ "$file_perms" != "400" ]]; then
+        log "ERROR" "Incorrect Google Authenticator file permissions: $file_perms"
+        return 1
     fi
     
     return 0
 }
 
-# Test PAM configuration
-test_pam_config() {
-    echo -n "Testing PAM configuration... "
+test_authentication_flow() {
+    log "INFO" "Testing complete authentication flow..."
     
-    # Check PAM module installation
-    if ! dpkg -l | grep -q "libpam-google-authenticator"; then
-        echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-        echo "Google Authenticator PAM module not installed"
+    # Generate test SSH key
+    local test_key="/tmp/test_ssh_key"
+    ssh-keygen -t ed25519 -f "$test_key" -N "" -C "2fa_test" || return 1
+    
+    # Add key to authorized_keys
+    cat "${test_key}.pub" >> "/home/$TEST_USER/.ssh/authorized_keys"
+    chmod 600 "/home/$TEST_USER/.ssh/authorized_keys"
+    chown "$TEST_USER:$TEST_USER" "/home/$TEST_USER/.ssh/authorized_keys"
+    
+    # Test authentication (this will fail as expected without 2FA code)
+    if ssh -i "$test_key" -o BatchMode=yes -o StrictHostKeyChecking=no "$TEST_USER@localhost" true 2>/dev/null; then
+        log "ERROR" "SSH access granted without 2FA"
         return 1
     fi
     
-    # Check PAM configuration
-    if ! grep -q "^auth.*required.*pam_google_authenticator.so" /etc/pam.d/sshd; then
-        echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-        echo "PAM not configured for Google Authenticator"
-        return 1
-    fi
+    # Clean up test key
+    rm -f "$test_key" "${test_key}.pub"
     
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
     return 0
 }
 
-# Test SSH configuration
-test_ssh_config() {
-    echo -n "Testing SSH configuration... "
+cleanup_test_env() {
+    log "INFO" "Cleaning up test environment..."
     
-    local sshd_config="/etc/ssh/sshd_config"
-    local failed=0
+    # Remove test user and home directory
+    userdel -r "$TEST_USER" 2>/dev/null || true
     
-    # Check required SSH settings
-    if ! grep -q "^ChallengeResponseAuthentication.*yes" "$sshd_config"; then
-        echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-        echo "ChallengeResponseAuthentication not enabled"
-        ((failed++))
-    fi
-    
-    if ! grep -q "^AuthenticationMethods.*keyboard-interactive" "$sshd_config"; then
-        echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-        echo "keyboard-interactive authentication not configured"
-        ((failed++))
-    fi
-    
-    # Verify SSH configuration syntax
-    if ! sshd -t >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-        echo "Invalid SSH configuration"
-        ((failed++))
-    fi
-    
-    if [[ $failed -eq 0 ]]; then
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-        return 0
-    fi
-    
-    return 1
+    # Remove any test files
+    rm -f "/tmp/test_ssh_key" "/tmp/test_ssh_key.pub"
 }
 
-# Test SSH connection with 2FA
-test_ssh_connection() {
-    local username="$1"
-    local test_port=22
+generate_test_report() {
+    local success="$1"
+    local report_file="/var/log/2fa-test-report.txt"
     
-    # Get configured SSH port
-    if [[ -f "/etc/server-hardening/hardening.conf" ]]; then
-        # shellcheck source=/dev/null
-        source "/etc/server-hardening/hardening.conf"
-        test_port="${SSH_PORT:-22}"
-    fi
+    {
+        echo "=== 2FA Testing Report ==="
+        echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Status: $([ "$success" == "true" ] && echo "PASSED" || echo "FAILED")"
+        echo
+        echo "=== Test Environment ==="
+        echo "Test User: $TEST_USER"
+        echo "PAM Module: $(dpkg -l libpam-google-authenticator | grep '^ii' | awk '{print $3}')"
+        echo "SSH Version: $(ssh -V 2>&1)"
+        echo
+        echo "=== Configuration Status ==="
+        echo "PAM Config:"
+        grep "auth.*pam_google_authenticator.so" /etc/pam.d/sshd 2>/dev/null || echo "Not configured"
+        echo
+        echo "SSH Config:"
+        grep -E "ChallengeResponseAuthentication|UsePAM|AuthenticationMethods" /etc/ssh/sshd_config
+        echo
+        echo "=== Test Results ==="
+        echo "PAM Configuration: $(test_pam_configuration >/dev/null 2>&1 && echo "PASS" || echo "FAIL")"
+        echo "SSH Configuration: $(test_ssh_configuration >/dev/null 2>&1 && echo "PASS" || echo "FAIL")"
+        echo "Google Authenticator: $(test_google_authenticator >/dev/null 2>&1 && echo "PASS" || echo "FAIL")"
+        echo "Authentication Flow: $(test_authentication_flow >/dev/null 2>&1 && echo "PASS" || echo "FAIL")"
+        echo
+        echo "=== Recommendations ==="
+        if [[ "$success" != "true" ]]; then
+            echo "- Review PAM configuration"
+            echo "- Check SSH settings"
+            echo "- Verify Google Authenticator setup"
+            echo "- Test manual authentication"
+        else
+            echo "- Perform manual 2FA verification"
+            echo "- Document backup codes"
+            echo "- Train users on 2FA process"
+        fi
+    } > "$report_file"
     
-    echo -n "Testing SSH with 2FA requirement... "
-    
-    # Test connection with keyboard-interactive auth
-    if ! timeout 5 ssh -o PreferredAuthentications=keyboard-interactive \
-                      -o BatchMode=yes \
-                      -o StrictHostKeyChecking=no \
-                      -p "$test_port" \
-                      "${username}@localhost" "true" 2>/dev/null; then
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-        echo "2FA prompt working as expected"
-        return 0
-    fi
-    
-    echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-    echo "SSH connection succeeded without 2FA"
-    return 1
+    chmod 600 "$report_file"
+    log "INFO" "Test report generated: $report_file"
 }
 
-# Main test function
-main() {
-    if [[ $# -ne 1 ]]; then
-        echo -e "${COLOR_RED}Usage: $0 <admin_username>${COLOR_RESET}"
-        exit 1
-    fi
-    
-    local username="$1"
-    local failed=0
-    
-    # Check if running as root
-    check_root
-    
-    # Clean username
-    username=$(echo "$username" | tr -cd 'a-z0-9_-')
-    
-    echo -e "\n${COLOR_CYAN}=== Testing 2FA Setup for: $username ===${COLOR_RESET}"
-    
-    # Verify user exists
-    if ! id "$username" >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}Error: User $username does not exist${COLOR_RESET}"
-        exit 1
-    fi
-    
-    # Run all tests
-    if ! test_ga_setup "$username"; then
-        echo "Google Authenticator setup test failed"
-        ((failed++))
-    fi
-    
-    if ! test_pam_config; then
-        echo "PAM configuration test failed"
-        ((failed++))
-    fi
-    
-    if ! test_ssh_config; then
-        echo "SSH configuration test failed"
-        ((failed++))
-    fi
-    
-    if ! test_ssh_connection "$username"; then
-        echo "SSH connection test failed"
-        ((failed++))
-    fi
-    
-    # Print summary
-    echo -e "\n${COLOR_CYAN}=== Test Summary ===${COLOR_RESET}"
-    if [[ $failed -eq 0 ]]; then
-        echo -e "${COLOR_GREEN}All 2FA tests passed successfully${COLOR_RESET}"
-        echo "You can now test 2FA login in another terminal"
-        echo "Command: ssh -o PreferredAuthentications=keyboard-interactive ${username}@localhost"
-    else
-        echo -e "${COLOR_RED}${failed} test(s) failed${COLOR_RESET}"
-        echo "Please check the errors above and fix any issues"
-    fi
-    
-    return $failed
-}
-
-# Run main function
-main "$@"
+# Main execution
+test_2fa_setup

@@ -32,12 +32,43 @@ sudo ./scripts/setup.sh
 If you're developing these scripts on Windows:
 
 1. Install Git for Windows with Git Bash
-2. Configure Git to handle line endings:
+2. Install WSL (Windows Subsystem for Linux) for local testing
+3. Run the test environment setup:
    ```bash
-   git config --global core.autocrlf input
+   ./test-env.sh
    ```
-3. Use Git Bash to run and test scripts during development
-4. Install WSL (Windows Subsystem for Linux) for local testing
+   This will:
+   - Set up a WSL test environment
+   - Install all required dependencies
+   - Generate test SSH keys
+   - Run the validation suite
+   - Verify the deployment
+
+## Installation Process
+
+1. Pre-Installation
+   - Review and complete docs/REQUIREMENTS.md checklist
+   - Ensure all system requirements are met
+   - Prepare SSH keys and backup methods
+   - Document current configuration
+
+2. Installation
+   ```bash
+   # Prepare deployment files
+   ./prepare-deploy.sh
+   
+   # Copy to server and run setup
+   scp -r deploy/* user@your-server:/path/to/destination/
+   ssh user@your-server
+   cd /path/to/destination/
+   sudo ./scripts/setup.sh
+   ```
+
+3. Post-Installation Verification
+   ```bash
+   # Verify deployment
+   sudo ./scripts/verify-deployment.sh username
+   ```
 
 ## Deployment
 
@@ -129,6 +160,39 @@ See [GUIDE.md](docs/GUIDE.md) for detailed instructions and manual setup steps.
 - `scripts/setup-ssh-key.sh`: Configures SSH key authentication
 - `scripts/setup-2fa.sh`: Sets up two-factor authentication
 - `scripts/harden.sh`: Applies system hardening configurations
+
+## Testing and Verification
+
+1. Local Testing (Windows)
+   ```bash
+   # Set up test environment
+   ./test-env.sh
+   
+   # Access test environment
+   wsl.exe
+   cd ~/hardening-test
+   ```
+
+2. Deployment Testing
+   - Automated preflight checks
+   - SSH key verification
+   - 2FA validation
+   - System hardening verification
+   - Service status checks
+   - Security configuration validation
+
+3. Continuous Monitoring
+   - Service status monitoring
+   - Security log analysis
+   - Failed login attempts tracking
+   - System update verification
+
+## Troubleshooting
+See [troubleshooting.md](docs/troubleshooting.md) for:
+- Common installation issues
+- Verification failures
+- Access recovery procedures
+- Service debugging steps
 
 ## Testing
 

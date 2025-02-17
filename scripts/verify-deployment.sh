@@ -1,186 +1,242 @@
 #!/bin/bash
-# Verify deployment and script functionality
+# Deployment verification script
 set -euo pipefail
 
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
-
-# Get absolute path of script directory
+# Source common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_BLUE='\033[1;34m'
-readonly COLOR_CYAN='\033[1;36m'
-readonly COLOR_RESET='\033[0m'
-
-# Function to run a test with proper formatting
-run_test() {
-    local test_name="$1"
-    shift
+verify_deployment() {
+    local success=true
+    local username="$1"
+    local config_file="/etc/server-hardening/hardening.conf"
     
-    echo -e "\n${COLOR_BLUE}=== Testing: ${test_name} ===${COLOR_RESET}"
-    if "$@"; then
-        echo -e "${COLOR_GREEN}✓ PASS: ${test_name}${COLOR_RESET}"
+    # Load configuration
+    if [[ -f "$config_file" ]]; then
+        source "$config_file"
+    else
+        log "ERROR" "Configuration file not found"
+        return 1
+    fi
+    
+    # Security Service Checks
+    echo "=== Verifying Security Services ==="
+    services_check || success=false
+    
+    # SSH Hardening Checks
+    echo "=== Verifying SSH Configuration ==="
+    ssh_check || success=false
+    
+    # Firewall Configuration
+    echo "=== Verifying Firewall Rules ==="
+    firewall_check || success=false
+    
+    # PAM and 2FA Configuration
+    echo "=== Verifying PAM and 2FA ==="
+    pam_check || success=false
+    
+    # System Security Settings
+    echo "=== Verifying System Security ==="
+    system_security_check || success=false
+    
+    # Package Security
+    echo "=== Verifying Package Security ==="
+    package_security_check || success=false
+    
+    # User Security
+    echo "=== Verifying User Security ==="
+    user_security_check "$username" || success=false
+    
+    # Network Security
+    echo "=== Verifying Network Security ==="
+    network_security_check || success=false
+    
+    if [[ "$success" == "true" ]]; then
+        log "SUCCESS" "Deployment verification completed successfully"
         return 0
     else
-        echo -e "${COLOR_RED}✗ FAIL: ${test_name}${COLOR_RESET}"
+        log "ERROR" "Deployment verification failed"
         return 1
     fi
 }
 
-# Test script permissions and line endings
-test_script_integrity() {
-    local failed=0
+services_check() {
+    local required_services=(
+        "sshd:SSH Server"
+        "fail2ban:Brute Force Protection"
+        "ufw:Firewall"
+        "unattended-upgrades:Automatic Updates"
+    )
     
-    echo "Checking script integrity..."
-    while IFS= read -r -d '' script; do
-        echo -n "Checking $(basename "$script")... "
-        
-        # Check executable permission
-        if [[ ! -x "$script" ]]; then
-            echo -e "${COLOR_RED}Not executable${COLOR_RESET}"
-            ((failed++))
-            continue
-        fi
-        
-        # Check for DOS line endings
-        if file "$script" | grep -q "CRLF"; then
-            echo -e "${COLOR_YELLOW}CRLF line endings found, fixing...${COLOR_RESET}"
-            sed -i 's/\r$//' "$script"
-            continue
-        fi
-        
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-    done < <(find "$SCRIPT_DIR" -type f -name "*.sh" -print0)
-    
-    return "$failed"
-}
-
-# Test sudo configuration
-test_sudo_config() {
-    local test_user="testuser$$"
-    
-    # Create test user
-    useradd -m -s /bin/bash "$test_user"
-    usermod -aG sudo "$test_user"
-    
-    # Test sudo access
-    if timeout 10 su -s /bin/bash - "$test_user" -c "sudo -n true"; then
-        local result=0
-    else
-        local result=1
-    fi
-    
-    # Cleanup
-    userdel -r "$test_user"
-    
-    return "$result"
-}
-
-# Test PAM configuration
-test_pam_config() {
-    local failed=0
-    
-    # Check essential PAM files
-    for file in /etc/pam.d/{sudo,su,sshd}; do
-        if [[ ! -f "$file" ]]; then
-            echo -e "${COLOR_RED}Missing PAM file: $file${COLOR_RESET}"
-            ((failed++))
-            continue
-        fi
-        
-        # Check permissions
-        if [[ "$(stat -c "%a" "$file")" != "644" ]]; then
-            echo -e "${COLOR_YELLOW}Incorrect permissions on $file, fixing...${COLOR_RESET}"
-            chmod 644 "$file"
+    local failed=false
+    for service in "${required_services[@]}"; do
+        local name="${service%%:*}"
+        local desc="${service#*:}"
+        if ! systemctl is-active --quiet "$name"; then
+            log "ERROR" "$desc ($name) is not running"
+            failed=true
         fi
     done
     
-    return "$failed"
+    ! "$failed"
 }
 
-# Test SSH configuration
-test_ssh_config() {
-    # Verify sshd configuration
-    if ! sshd -t; then
-        return 1
+ssh_check() {
+    local config="/etc/ssh/sshd_config"
+    local failed=false
+    
+    # Required SSH settings
+    declare -A ssh_settings=(
+        ["PermitRootLogin"]="no"
+        ["PasswordAuthentication"]="no"
+        ["X11Forwarding"]="no"
+        ["MaxAuthTries"]="3"
+    )
+    
+    for key in "${!ssh_settings[@]}"; do
+        if ! grep -q "^${key} ${ssh_settings[$key]}" "$config"; then
+            log "ERROR" "SSH setting $key=${ssh_settings[$key]} not properly configured"
+            failed=true
+        fi
+    done
+    
+    # Verify custom SSH port
+    if ! grep -q "^Port ${SSH_PORT:-3333}" "$config"; then
+        log "ERROR" "Custom SSH port not properly configured"
+        failed=true
     fi
     
-    # Check if SSH service is running
-    if ! systemctl is-active --quiet sshd; then
-        return 1
-    fi
-    
-    return 0
+    ! "$failed"
 }
 
-# Test firewall configuration
-test_firewall_config() {
-    # Check if UFW is installed and enabled
-    if ! command -v ufw >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}UFW is not installed${COLOR_RESET}"
-        return 1
-    fi
-    
+firewall_check() {
+    # Check UFW status
     if ! ufw status | grep -q "Status: active"; then
-        echo -e "${COLOR_RED}Firewall is not active${COLOR_RESET}"
+        log "ERROR" "Firewall is not active"
         return 1
     fi
+    
+    # Verify required ports
+    local required_ports=(${SSH_PORT:-3333} ${FIREWALL_ADDITIONAL_PORTS//,/ })
+    for port in "${required_ports[@]}"; do
+        if ! ufw status | grep -q "$port"; then
+            log "ERROR" "Required port $port not configured in firewall"
+            return 1
+        fi
+    done
     
     return 0
 }
 
-# Test fail2ban configuration
-test_fail2ban_config() {
-    # Check if fail2ban is installed and running
-    if ! systemctl is-active --quiet fail2ban; then
-        return 1
+pam_check() {
+    local failed=false
+    
+    # Check PAM configuration
+    if [[ "${MFA_ENABLED:-yes}" == "yes" ]]; then
+        if ! grep -q "pam_google_authenticator.so" /etc/pam.d/sshd; then
+            log "ERROR" "2FA PAM module not properly configured"
+            failed=true
+        fi
     fi
     
-    # Check jail configuration
-    if ! fail2ban-client ping >/dev/null 2>&1; then
-        return 1
+    # Verify secure PAM settings
+    if ! grep -q "auth required pam_unix.so" /etc/pam.d/common-auth; then
+        log "ERROR" "Basic PAM authentication not properly configured"
+        failed=true
     fi
     
-    return 0
+    ! "$failed"
 }
 
-# Main function
-main() {
-    local failed=0
+system_security_check() {
+    local failed=false
     
-    echo -e "${COLOR_CYAN}Starting deployment verification...${COLOR_RESET}"
+    # Check sysctl security settings
+    declare -A sysctl_settings=(
+        ["net.ipv4.conf.all.accept_redirects"]="0"
+        ["net.ipv4.conf.all.secure_redirects"]="0"
+        ["net.ipv4.conf.all.accept_source_route"]="0"
+        ["kernel.sysrq"]="0"
+    )
     
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${COLOR_RED}Error: This script must be run as root${COLOR_RESET}"
-        exit 1
-    fi
+    for setting in "${!sysctl_settings[@]}"; do
+        local value
+        value=$(sysctl -n "$setting" 2>/dev/null || echo "NOT_SET")
+        if [[ "$value" != "${sysctl_settings[$setting]}" ]]; then
+            log "ERROR" "System security setting $setting not properly configured"
+            failed=true
+        fi
+    done
     
-    # Run all tests
-    run_test "Script Integrity" test_script_integrity || ((failed++))
-    run_test "Sudo Configuration" test_sudo_config || ((failed++))
-    run_test "PAM Configuration" test_pam_config || ((failed++))
-    run_test "SSH Configuration" test_ssh_config || ((failed++))
-    run_test "Firewall Configuration" test_firewall_config || ((failed++))
-    run_test "Fail2ban Configuration" test_fail2ban_config || ((failed++))
-    
-    # Print summary
-    echo -e "\n${COLOR_BLUE}=== Verification Summary ===${COLOR_RESET}"
-    if [[ $failed -eq 0 ]]; then
-        echo -e "${COLOR_GREEN}All tests passed successfully${COLOR_RESET}"
-        echo -e "\nThe deployment is properly configured and ready to use."
-    else
-        echo -e "${COLOR_RED}${failed} test(s) failed${COLOR_RESET}"
-        echo -e "\nPlease check the errors above and fix any issues before proceeding."
-    fi
-    
-    return "$failed"
+    ! "$failed"
 }
 
-# Run main function
-main "$@"
+package_security_check() {
+    local failed=false
+    
+    # Check if automatic updates are enabled
+    if [[ "${ENABLE_AUTO_UPDATES:-yes}" == "yes" ]]; then
+        if ! grep -q "APT::Periodic::Unattended-Upgrade \"1\"" /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+            log "ERROR" "Automatic updates not properly configured"
+            failed=true
+        fi
+    fi
+    
+    ! "$failed"
+}
+
+user_security_check() {
+    local username="$1"
+    local failed=false
+    
+    # Check user exists and is in sudo group
+    if ! id "$username" >/dev/null 2>&1; then
+        log "ERROR" "Admin user $username does not exist"
+        failed=true
+    elif ! groups "$username" | grep -q "\bsudo\b"; then
+        log "ERROR" "Admin user $username is not in sudo group"
+        failed=true
+    fi
+    
+    # Check SSH directory permissions
+    local ssh_dir="/home/$username/.ssh"
+    if [[ -d "$ssh_dir" ]]; then
+        if [[ "$(stat -c "%a" "$ssh_dir")" != "700" ]]; then
+            log "ERROR" "Incorrect SSH directory permissions for $username"
+            failed=true
+        fi
+        
+        if [[ -f "$ssh_dir/authorized_keys" ]] && [[ "$(stat -c "%a" "$ssh_dir/authorized_keys")" != "600" ]]; then
+            log "ERROR" "Incorrect authorized_keys permissions for $username"
+            failed=true
+        fi
+    fi
+    
+    ! "$failed"
+}
+
+network_security_check() {
+    local failed=false
+    
+    # Check IPv6 status
+    if [[ "${ENABLE_IPV6:-no}" == "no" ]] && ! grep -q "^net.ipv6.conf.all.disable_ipv6 = 1" /etc/sysctl.d/99-security.conf; then
+        log "ERROR" "IPv6 not properly disabled"
+        failed=true
+    fi
+    
+    # Check network hardening
+    if ! grep -q "net.ipv4.tcp_syncookies = 1" /etc/sysctl.d/99-security.conf; then
+        log "ERROR" "TCP SYN cookie protection not enabled"
+        failed=true
+    fi
+    
+    ! "$failed"
+}
+
+# Main execution
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 username"
+    exit 1
+fi
+
+verify_deployment "$1"

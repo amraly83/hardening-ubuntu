@@ -1,84 +1,120 @@
 #!/bin/bash
-# Initialize sudo access with proper cross-platform handling
+# Enhanced sudo initialization script
 set -euo pipefail
 
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
-
-# Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_RESET='\033[0m'
-
-# Clean and validate username
-username="$1"
-if [ -z "$username" ]; then
-    echo -e "${COLOR_RED}Usage: $0 username${COLOR_RESET}" >&2
-    exit 1
-fi
-
-# Clean username to prevent concatenation issues
-username=$(echo "$username" | tr -cd 'a-z0-9_-')
-
-# Verify user exists
-if ! id "$username" >/dev/null 2>&1; then
-    echo -e "${COLOR_RED}Error: User $username does not exist${COLOR_RESET}" >&2
-    exit 1
-fi
-
-# Clear sudo state
-sudo -K -u "$username" 2>/dev/null || true
-rm -f /run/sudo/ts/* 2>/dev/null || true
-
-# Ensure sudo group exists
-if ! getent group sudo >/dev/null 2>&1; then
-    groupadd sudo
-fi
-
-# Add to sudo group if needed
-if ! groups "$username" | grep -q '\bsudo\b'; then
-    usermod -aG sudo "$username"
-    # Force group update
-    sg sudo -c "id" || true
-fi
-
-# Create or update sudoers entry
-mkdir -p /etc/sudoers.d
-chmod 750 /etc/sudoers.d
-
-# Start with NOPASSWD for testing
-echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
-chmod 440 "/etc/sudoers.d/$username"
-
-# Test sudo access with retries
-max_attempts=3
-attempt=1
-success=false
-
-while [ $attempt -le $max_attempts ]; do
-    echo -n "Testing sudo access (attempt $attempt/$max_attempts)... "
-    if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-        success=true
-        break
+init_sudo() {
+    local username="$1"
+    local backup_suffix=".$(date +%Y%m%d_%H%M%S).bak"
+    
+    # Backup existing sudo configuration
+    cp -p /etc/sudoers "/etc/sudoers${backup_suffix}"
+    
+    # Create secure sudoers.d directory if it doesn't exist
+    if [[ ! -d "/etc/sudoers.d" ]]; then
+        mkdir -p "/etc/sudoers.d"
+        chmod 750 "/etc/sudoers.d"
     fi
-    echo -e "${COLOR_RED}Failed${COLOR_RESET}"
-    sleep 1
-    ((attempt++))
-done
+    
+    # Create a custom sudo configuration for the user
+    cat > "/etc/sudoers.d/01-${username}" << EOF
+# Sudo configuration for $username
+# Created by hardening script on $(date)
 
-if [ "$success" = true ]; then
-    # Switch to password-required configuration
-    echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
-    chmod 440 "/etc/sudoers.d/$username"
-    echo -e "${COLOR_GREEN}Sudo access configured successfully${COLOR_RESET}"
-    exit 0
+# User privilege specification
+$username ALL=(ALL:ALL) ALL
+
+# Security settings
+Defaults:$username timestamp_timeout=15
+Defaults:$username passwd_tries=3
+Defaults:$username badpass_message="Invalid password. Access denied."
+Defaults:$username log_input,log_output
+Defaults:$username iolog_dir=/var/log/sudo-io/%{user}
+
+# Allow session persistence for SSH agent
+Defaults:$username env_keep += "SSH_AUTH_SOCK"
+
+# Secure path
+Defaults:$username secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EOF
+    
+    # Set proper permissions
+    chmod 440 "/etc/sudoers.d/01-${username}"
+    
+    # Create sudo I/O logging directory
+    mkdir -p "/var/log/sudo-io/${username}"
+    chmod 700 "/var/log/sudo-io/${username}"
+    
+    # Validate sudo configuration
+    if ! visudo -c -f "/etc/sudoers" || ! visudo -c -f "/etc/sudoers.d/01-${username}"; then
+        log "ERROR" "Invalid sudo configuration"
+        mv "/etc/sudoers${backup_suffix}" /etc/sudoers
+        rm -f "/etc/sudoers.d/01-${username}"
+        return 1
+    fi
+    
+    # Test sudo access
+    if ! test_sudo_access "$username"; then
+        log "ERROR" "Failed to verify sudo access"
+        mv "/etc/sudoers${backup_suffix}" /etc/sudoers
+        rm -f "/etc/sudoers.d/01-${username}"
+        return 1
+    fi
+    
+    # Set up sudo log rotation
+    setup_sudo_logging
+    
+    log "SUCCESS" "Sudo initialization completed for $username"
+    return 0
+}
+
+test_sudo_access() {
+    local username="$1"
+    local test_cmd="true"
+    
+    # Try sudo access with timeout
+    timeout 5 su -c "sudo -n $test_cmd" "$username" >/dev/null 2>&1 || {
+        # If immediate sudo fails, try with password prompt
+        log "WARNING" "Non-password sudo failed, testing with password prompt..."
+        if ! timeout 10 su -c "sudo $test_cmd" "$username" >/dev/null 2>&1; then
+            return 1
+        fi
+    }
+    
+    return 0
+}
+
+setup_sudo_logging() {
+    # Configure sudo log rotation
+    cat > "/etc/logrotate.d/sudo" << 'EOF'
+/var/log/sudo-io/*/*/*/*/* {
+    rotate 7
+    daily
+    compress
+    missingok
+    notifempty
+    create 0600 root root
+}
+EOF
+    
+    # Set up auditd rules for sudo
+    if command -v auditctl >/dev/null 2>&1; then
+        cat > "/etc/audit/rules.d/99-sudo.rules" << 'EOF'
+-w /etc/sudoers -p wa -k sudo_conf_changes
+-w /etc/sudoers.d/ -p wa -k sudo_conf_changes
+-w /var/log/sudo-io -p wa -k sudo_log_access
+EOF
+        # Reload audit rules
+        auditctl -R /etc/audit/rules.d/99-sudo.rules || true
+    fi
+}
+
+# Main execution
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 username"
+    exit 1
 fi
 
-echo -e "${COLOR_RED}Failed to verify sudo access after $max_attempts attempts${COLOR_RESET}" >&2
-exit 1
+init_sudo "$1"
