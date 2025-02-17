@@ -132,7 +132,7 @@ verify_network_state() {
         ssh_port="${SSH_PORT:-22}"
     fi
     
-    if netstat -ln | grep -q ":${ssh_port}[[:space:]]"; then
+    if ss -ln | grep -q ":${ssh_port}[[:space:]]"; then
         if ! systemctl is-active --quiet sshd; then
             log "ERROR" "SSH port ${ssh_port} in use by another process"
             status=1
