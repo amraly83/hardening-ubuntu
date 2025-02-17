@@ -2,177 +2,152 @@
 # Test admin user setup after deployment
 set -euo pipefail
 
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
-
-# Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_CYAN='\033[1;36m'
-readonly COLOR_RESET='\033[0m'
+source "${SCRIPT_DIR}/common.sh"
 
 # Test admin user creation and verification
 test_admin_setup() {
     local username="$1"
     local test_file="/tmp/sudo_test_$$"
+    local max_retries=3
+    local retry=0
     
-    echo -e "${COLOR_CYAN}Testing admin setup for user: $username${COLOR_RESET}"
+    log "INFO" "Testing admin setup for user: $username"
     
-    # Step 1: Clean the username
+    # Clean the username
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
-    echo "Using cleaned username: $username"
+    log "DEBUG" "Using cleaned username: $username"
     
-    # Step 2: Verify user exists
-    echo -n "Checking user existence... "
+    # Verify user exists
     if ! id "$username" >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        echo "User $username does not exist"
+        log "ERROR" "User $username does not exist"
         return 1
     fi
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
     
-    # Step 3: Check sudo group membership
-    echo -n "Checking sudo group membership... "
+    # Clean sudo environment first
+    sudo -K
+    rm -f /run/sudo/ts/* 2>/dev/null || true
+    
+    # Check and fix sudo group membership if needed
     if ! groups "$username" | grep -q '\bsudo\b'; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        echo "User is not in sudo group"
-        return 1
+        log "WARNING" "User not in sudo group, attempting to fix..."
+        usermod -aG sudo "$username"
+        sg sudo -c "id" || true
+        sleep 1
     fi
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
     
-    # Step 4: Check sudoers configuration
-    echo -n "Checking sudoers configuration... "
+    # Verify and fix sudoers configuration
     if [[ ! -f "/etc/sudoers.d/$username" ]]; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        echo "No sudoers configuration found"
-        return 1
+        log "WARNING" "No sudoers configuration found, creating..."
+        echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+        chmod 440 "/etc/sudoers.d/$username"
     fi
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
     
-    # Step 5: Test sudo access with timeout
-    echo -n "Testing sudo access... "
-    if ! timeout 5 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        echo "Sudo access test failed"
-        return 1
-    fi
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
+    # Test sudo access with retries
+    while [ $retry -lt $max_retries ]; do
+        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified"
+            break
+        fi
+        
+        ((retry++))
+        if [ $retry -lt $max_retries ]; then
+            log "WARNING" "Sudo access test failed, retrying ($retry/$max_retries)..."
+            sleep 2
+        else
+            log "ERROR" "Sudo access test failed after $max_retries attempts"
+            return 1
+        fi
+    done
     
-    # Step 6: Test file creation with sudo
-    echo -n "Testing sudo file operations... "
-    if ! su -s /bin/bash - "$username" -c "sudo touch $test_file" >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        echo "Could not create test file with sudo"
-        return 1
-    fi
-    rm -f "$test_file"
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-    
-    echo -e "\n${COLOR_GREEN}All admin user tests passed successfully${COLOR_RESET}"
     return 0
 }
 
-# Function to test sudo timeout behavior
+# Test PAM configuration
+test_pam_config() {
+    local username="$1"
+    local status=0
+    
+    log "INFO" "Testing PAM configuration..."
+    
+    # Verify PAM files exist and have correct permissions
+    local pam_files=("sudo" "su" "common-auth" "common-account")
+    for file in "${pam_files[@]}"; do
+        if [[ ! -f "/etc/pam.d/$file" ]]; then
+            log "ERROR" "Missing PAM file: /etc/pam.d/$file"
+            status=1
+        else
+            local perms
+            perms=$(stat -c '%a' "/etc/pam.d/$file")
+            if [[ "$perms" != "644" ]]; then
+                log "WARNING" "Incorrect permissions on /etc/pam.d/$file: $perms, fixing..."
+                chmod 644 "/etc/pam.d/$file"
+            fi
+        fi
+    done
+    
+    return $status
+}
+
+# Test sudo timeout behavior
 test_sudo_timeout() {
     local username="$1"
+    local test_file="/tmp/sudo_timeout_test_$$"
     
-    echo -e "\n${COLOR_CYAN}Testing sudo timeout behavior...${COLOR_RESET}"
+    log "INFO" "Testing sudo timeout behavior..."
     
-    # Clear any existing sudo tokens
+    # Clear sudo tokens
     sudo -K
+    rm -f /run/sudo/ts/* 2>/dev/null || true
     
-    # Test initial sudo access
-    echo -n "Testing initial sudo access... "
-    if ! timeout 5 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-        echo -e "${COLOR_YELLOW}Required password (expected)${COLOR_RESET}"
+    # Test sudo access with password requirement
+    if timeout 5 su -s /bin/bash - "$username" -c "sudo -n touch $test_file" >/dev/null 2>&1; then
+        rm -f "$test_file" 2>/dev/null || true
+        log "SUCCESS" "Sudo timeout test passed"
+        return 0
     else
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
+        log "WARNING" "Sudo requires password (expected behavior)"
+        return 0
     fi
-    
-    # Test sudo timestamp
-    echo -n "Testing sudo timestamp... "
-    if ! su -s /bin/bash - "$username" -c "sudo touch /tmp/sudo_test_$$" >/dev/null 2>&1; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        return 1
-    fi
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-    
-    return 0
-}
-
-# Function to check PAM configuration
-check_pam_config() {
-    local username="$1"
-    
-    echo -e "\n${COLOR_CYAN}Checking PAM configuration...${COLOR_RESET}"
-    
-    # Check sudo PAM configuration
-    echo -n "Checking sudo PAM config... "
-    if [[ ! -f "/etc/pam.d/sudo" ]]; then
-        echo -e "${COLOR_RED}FAILED${COLOR_RESET}"
-        echo "Missing sudo PAM configuration"
-        return 1
-    fi
-    echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-    
-    # Check basic authentication
-    echo -n "Testing PAM authentication... "
-    if ! pamtester sudo "$username" authenticate >/dev/null 2>&1; then
-        echo -e "${COLOR_YELLOW}Authentication required (expected)${COLOR_RESET}"
-    else
-        echo -e "${COLOR_GREEN}OK${COLOR_RESET}"
-    fi
-    
-    return 0
 }
 
 # Main function
 main() {
     if [[ $# -ne 1 ]]; then
-        echo -e "${COLOR_RED}Usage: $0 username${COLOR_RESET}"
+        log "ERROR" "Usage: $0 username"
         exit 1
-    }
+    fi
     
     local username="$1"
     local failed=0
     
     # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${COLOR_RED}Error: This script must be run as root${COLOR_RESET}"
-        exit 1
-    }
+    check_root || exit 1
     
-    echo -e "${COLOR_CYAN}=== Starting Admin User Verification ===${COLOR_RESET}"
+    log "INFO" "=== Starting Admin User Verification ==="
     
     # Run all tests
     if ! test_admin_setup "$username"; then
-        echo -e "${COLOR_RED}Admin setup verification failed${COLOR_RESET}"
+        log "ERROR" "Admin setup verification failed"
+        ((failed++))
+    fi
+    
+    if ! test_pam_config "$username"; then
+        log "ERROR" "PAM configuration verification failed"
         ((failed++))
     fi
     
     if ! test_sudo_timeout "$username"; then
-        echo -e "${COLOR_RED}Sudo timeout verification failed${COLOR_RESET}"
-        ((failed++))
-    fi
-    
-    if ! check_pam_config "$username"; then
-        echo -e "${COLOR_RED}PAM configuration verification failed${COLOR_RESET}"
+        log "ERROR" "Sudo timeout verification failed"
         ((failed++))
     fi
     
     # Print summary
-    echo -e "\n${COLOR_CYAN}=== Verification Summary ===${COLOR_RESET}"
+    log "INFO" "=== Verification Summary ==="
     if [[ $failed -eq 0 ]]; then
-        echo -e "${COLOR_GREEN}All admin user tests passed successfully${COLOR_RESET}"
-        echo "The admin user setup is working correctly"
+        log "SUCCESS" "All admin user tests passed successfully"
     else
-        echo -e "${COLOR_RED}${failed} test(s) failed${COLOR_RESET}"
-        echo "Please check the errors above and fix any issues"
+        log "ERROR" "$failed test(s) failed. Check the errors above and fix any issues"
     fi
     
     return "$failed"

@@ -2,25 +2,12 @@
 # Create and set up admin user with proper handling for 2FA
 set -euo pipefail
 
-# Fix line endings for this script first
+# Fix line endings and setup
 sed -i 's/\r$//' "${BASH_SOURCE[0]}"
 chmod +x "${BASH_SOURCE[0]}"
 
-# Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Source common functions after fixing line endings
-if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
-    sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
-    source "${SCRIPT_DIR}/common.sh"
-else
-    # Only define colors if common.sh is not available
-    declare -r COLOR_GREEN='\033[1;32m'
-    declare -r COLOR_RED='\033[1;31m'
-    declare -r COLOR_YELLOW='\033[1;33m'
-    declare -r COLOR_CYAN='\033[1;36m'
-    declare -r COLOR_RESET='\033[0m'
-fi
+source "${SCRIPT_DIR}/common.sh"
 
 # Function to create admin user
 create_admin() {
@@ -30,6 +17,13 @@ create_admin() {
     # Clean username first
     username=$(echo "$username" | tr -cd 'a-z0-9_-')
     log "DEBUG" "Creating admin user: $username"
+    
+    # Initialize PAM first to ensure authentication works
+    log "INFO" "Initializing PAM configuration..."
+    if ! "${SCRIPT_DIR}/init-pam.sh"; then
+        log "ERROR" "PAM initialization failed"
+        return 1
+    fi
     
     # Create user if doesn't exist
     if ! id "$username" >/dev/null 2>&1; then
@@ -50,20 +44,30 @@ create_admin() {
     fi
     
     # Initialize sudo access
-    if ! init_admin_access "$username"; then
-        log "ERROR" "Failed to initialize admin access"
-        status=1
+    log "INFO" "Setting up sudo access..."
+    if ! "${SCRIPT_DIR}/init-sudo-access.sh" "$username"; then
+        log "ERROR" "Failed to initialize sudo access"
+        fix_sudo_auth "$username" || return 1
     fi
     
-    # Initialize PAM for later 2FA setup
-    if ! "${SCRIPT_DIR}/init-pam.sh"; then
-        log "WARNING" "PAM initialization had issues"
-    fi
+    # Verify final setup with retries
+    local verify_attempts=3
+    local attempt=1
+    local verify_success=false
     
-    # Verify final setup
-    if ! verify_admin_setup "$username"; then
-        log "ERROR" "Failed to verify admin setup"
-        status=1
+    while [[ $attempt -le $verify_attempts ]]; do
+        log "DEBUG" "Verifying admin setup (attempt $attempt/$verify_attempts)"
+        if verify_admin_setup "$username"; then
+            verify_success=true
+            break
+        fi
+        ((attempt++))
+        sleep 2
+    done
+    
+    if ! $verify_success; then
+        log "ERROR" "Failed to verify admin setup after $verify_attempts attempts"
+        return 1
     fi
     
     return $status
