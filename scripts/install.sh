@@ -88,6 +88,12 @@ main() {
     # Start installation
     log "INFO" "Starting server hardening installation..."
     
+    # Fix critical permissions first
+    stage="permissions"
+    if ! "${SCRIPT_DIR}/fix-permissions.sh"; then
+        error_exit "Failed to fix critical permissions"
+    fi
+    
     # Run preflight checks
     stage="preflight"
     if ! "${SCRIPT_DIR}/preflight.sh"; then
