@@ -60,7 +60,7 @@ update_stage() {
     # Validate stage
     if [[ ! " ${!STAGES[@]} " =~ " $stage " ]]; then
         error_exit "Invalid stage: $stage"
-    }
+    fi
     
     # Check dependencies
     local deps="${STAGES[$stage]}"
@@ -68,7 +68,7 @@ update_stage() {
         for dep in $deps; do
             if ! check_stage_complete "$dep"; then
                 error_exit "Dependency not met: $stage requires $dep"
-            }
+            fi
         done
     fi
     
