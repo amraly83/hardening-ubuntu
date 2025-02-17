@@ -228,8 +228,8 @@ verify_sudo_access() {
     
     log "INFO" "Starting sudo access verification for $username..."
     
-    # Clean the username to prevent command injection
-    username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    # Clean any ANSI color codes and control characters first
+    username=$(echo "$username" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -cd 'a-z0-9_-')
     
     # First verify user exists
     if ! id "$username" >/dev/null 2>&1; then
@@ -245,6 +245,9 @@ verify_sudo_access() {
     log "DEBUG" "Setting up sudo configuration..."
     if ! groups "$username" | grep -q '\bsudo\b'; then
         usermod -aG sudo "$username"
+        # Force group update
+        sg sudo -c "id" || true
+        sleep 1
     fi
     
     # Create initial NOPASSWD configuration
@@ -254,13 +257,22 @@ verify_sudo_access() {
     echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
     chmod 440 "/etc/sudoers.d/$username"
     
-    # Simple verification loop
+    # Simple verification loop with basic commands
     while [[ $retry -lt $max_retries ]]; do
         log "DEBUG" "Verifying sudo access (attempt $((retry + 1))/$max_retries)"
         
-        # Direct sudo test with timeout
-        if timeout 5 su -s /bin/bash - "$username" -c "sudo -n id" >/dev/null 2>&1; then
+        # Try a simple command first
+        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
             log "SUCCESS" "Sudo access verified"
+            # Switch to password-required configuration
+            echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
+            chmod 440 "/etc/sudoers.d/$username"
+            return 0
+        fi
+        
+        # If simple command failed, try with id command
+        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n id'" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified (using id command)"
             # Switch to password-required configuration
             echo "$username ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$username"
             chmod 440 "/etc/sudoers.d/$username"
@@ -270,11 +282,12 @@ verify_sudo_access() {
         ((retry++))
         if [[ $retry -lt $max_retries ]]; then
             log "DEBUG" "Waiting before retry..."
-            sleep 2
+            sleep "$delay"
+            ((delay *= 2))  # Exponential backoff
         fi
     done
     
-    log "ERROR" "Failed to verify sudo access"
+    log "ERROR" "Failed to verify sudo access after $max_retries attempts"
     return 1
 }
 

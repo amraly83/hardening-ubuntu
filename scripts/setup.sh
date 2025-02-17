@@ -344,7 +344,8 @@ verify_step() {
 # Function to safely verify sudo access with auto-repair
 verify_admin_setup() {
     local username="$1"
-    username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    # Clean any ANSI color codes and control characters
+    username=$(echo "$username" | sed 's/\x1B\[[0-9;]*[JKmsu]//g' | tr -cd 'a-z0-9_-')
     
     log "INFO" "Starting admin verification for $username"
     
@@ -367,7 +368,7 @@ verify_admin_setup() {
         return 1
     fi
     
-    # Verify final state
+    # Step 3: Verify final state
     log "DEBUG" "Verifying final configuration..."
     if ! groups "$username" | grep -q '\bsudo\b'; then
         log "ERROR" "User is not in sudo group after initialization"
@@ -376,6 +377,12 @@ verify_admin_setup() {
     
     if ! test -f "/etc/sudoers.d/$username"; then
         log "ERROR" "Sudoers configuration missing after initialization"
+        return 1
+    fi
+    
+    # Step 4: Final quick sudo test
+    if ! timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
+        log "ERROR" "Final sudo verification failed"
         return 1
     fi
     
