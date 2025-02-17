@@ -380,55 +380,51 @@ verify_admin_setup() {
             echo "#includedir /etc/sudoers.d" >> /etc/sudoers
         fi
         
-        # Always start with NOPASSWD configuration
+        # Create NOPASSWD configuration first
         local sudoers_file="/etc/sudoers.d/$username"
-        log "DEBUG" "Creating temporary NOPASSWD sudo access"
-        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
-        chmod 440 "$sudoers_file"
+        local temp_sudoers="/etc/sudoers.d/.${username}.tmp"
         
-        # Validate sudoers syntax
-        if ! visudo -c -f "$sudoers_file" >/dev/null 2>&1; then
-            log "ERROR" "Invalid sudoers entry for $username"
-            rm -f "$sudoers_file"
+        log "DEBUG" "Creating sudo configuration"
+        cat > "$temp_sudoers" << EOF
+# Sudo configuration for $username
+$username ALL=(ALL:ALL) ALL
+EOF
+        chmod 440 "$temp_sudoers"
+        
+        # Validate syntax before moving into place
+        if ! visudo -c -f "$temp_sudoers" >/dev/null 2>&1; then
+            log "ERROR" "Invalid sudoers entry"
+            rm -f "$temp_sudoers"
             return 1
         fi
         
-        # Reset sudo timestamp and environment
-        log "DEBUG" "Resetting sudo environment"
-        sudo -k || true  # Reset all sudo timestamps
-        sudo -K -u "$username" 2>/dev/null || true  # Reset user's sudo timestamp
+        # Move validated config into place
+        mv "$temp_sudoers" "$sudoers_file"
         
-        # Ensure clean environment for sudo tests
-        unset SUDO_ASKPASS SUDO_EDITOR SUDO_PROMPT || true
-        
-        # Force refresh of user's groups
-        log "DEBUG" "Refreshing group membership"
-        pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
-        
-        # Initial sudo test with NOPASSWD
-        log "DEBUG" "Testing initial NOPASSWD sudo access"
-        if ! su -l "$username" -c "sudo -n true" >/dev/null 2>&1; then
-            log "DEBUG" "Initial NOPASSWD test failed, trying group refresh"
+        # Ensure group membership
+        if ! groups "$username" | grep -q '\bsudo\b'; then
+            log "DEBUG" "Adding user to sudo group"
             usermod -aG sudo "$username"
-            pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
-            sleep 2
+        fi
+        
+        # Reset sudo timestamp for the user (without killing sessions)
+        sudo -K -u "$username" 2>/dev/null || true
+        
+        # Test sudo access without session reset
+        if ! su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+            log "WARNING" "Initial sudo test failed, creating NOPASSWD entry temporarily"
+            echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
+            chmod 440 "$sudoers_file"
             
-            # Try again after group refresh
-            if ! su -l "$username" -c "sudo -n true" >/dev/null 2>&1; then
-                log "ERROR" "Failed to verify sudo access even with NOPASSWD"
+            # Test again
+            if ! su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
+                log "ERROR" "Sudo access verification failed"
                 return 1
             fi
-        fi
-        
-        # If NOPASSWD test succeeds, switch to password-required configuration
-        log "DEBUG" "NOPASSWD verification successful, switching to password-required configuration"
-        echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
-        chmod 440 "$sudoers_file"
-        
-        # Final verification that user is in sudo group
-        if ! groups "$username" | grep -q '\bsudo\b'; then
-            log "ERROR" "User is not in sudo group after configuration"
-            return 1
+            
+            # If NOPASSWD test succeeds, switch back to password configuration
+            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
+            chmod 440 "$sudoers_file"
         fi
         
         log "SUCCESS" "Sudo access configured successfully"
