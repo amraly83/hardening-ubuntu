@@ -38,6 +38,9 @@ verify_user() {
     local username="$1"
     local status=0
     
+    # Clean and validate username
+    username=$(echo "$username" | tr -cd 'a-z0-9_-')
+    
     # Check user exists
     if ! id "$username" >/dev/null 2>&1; then
         log "ERROR" "User $username does not exist"
@@ -129,7 +132,8 @@ main() {
     # Load configuration
     load_config
     
-    # Run verifications
+    # Clean username and verify
+    username=$(echo "$username" | tr -cd 'a-z0-9_-')
     verify_user "$username" || all_passed=1
     verify_services || all_passed=1
     
