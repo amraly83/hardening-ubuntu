@@ -419,7 +419,7 @@ ensure_sudo_membership() {
     while [[ $attempt -le $max_attempts ]]; do
         log "DEBUG" "Checking sudo membership (attempt $attempt/$max_attempts)"
         
-        # First check if sudo group exists
+        # Ensure sudo group exists
         if ! getent group sudo >/dev/null 2>&1; then
             log "DEBUG" "Creating sudo group"
             groupadd sudo || {
@@ -428,54 +428,36 @@ ensure_sudo_membership() {
             }
         fi
         
-        # Check current groups
-        local current_groups
-        current_groups=$(groups "$username" 2>&1)
-        log "DEBUG" "Current groups before modification: $current_groups"
+        # Clean sudo state
+        sudo -K -u "$username" 2>/dev/null || true
+        rm -f "/run/sudo/ts/*" 2>/dev/null || true
         
-        if echo "$current_groups" | grep -qE '\b(sudo|admin|wheel)\b'; then
-            log "SUCCESS" "User $username is in sudo group"
-            # Verify group file entry
-            if ! grep -q "^sudo:.*:.*:.*\b${username}\b" /etc/group; then
-                log "DEBUG" "Fixing group file entry"
-                usermod -aG sudo "$username" || true
-            fi
-            return 0
+        # Check and fix group membership
+        if ! groups "$username" | grep -q '\bsudo\b'; then
+            log "DEBUG" "Adding to sudo group..."
+            usermod -aG sudo "$username"
+            sg sudo -c "id" || true
+            sleep 1
         fi
         
-        log "WARNING" "User $username not in sudo group, attempting to add..."
-        
-        # Try to add to sudo group
-        if ! usermod -aG sudo "$username"; then
-            log "DEBUG" "usermod failed, trying direct group file modification"
-            # Backup group file
-            cp /etc/group /etc/group.bak
-            # Try to add directly to group file
-            if ! sed -i "/^sudo:/s/$/,${username}/" /etc/group; then
-                log "ERROR" "Failed to modify group file"
-                mv /etc/group.bak /etc/group
-            fi
-        fi
-        
-        # Create or update sudoers entry without password requirement initially
+        # Set up sudoers entry if needed
         if [[ ! -f "/etc/sudoers.d/$username" ]]; then
-            log "DEBUG" "Creating initial sudoers entry"
             echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
             chmod 440 "/etc/sudoers.d/$username"
         fi
         
-        # Test sudo access without session reset
-        if su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-            log "SUCCESS" "Verified sudo group membership"
+        # Verify sudo access
+        if timeout 5 bash -c "su -s /bin/bash - '$username' -c 'sudo -n true'" >/dev/null 2>&1; then
+            log "SUCCESS" "Sudo access verified"
             return 0
         fi
         
-        log "WARNING" "Sudo group modification attempt $attempt failed"
-        sleep 2
+        log "WARNING" "Sudo verification attempt $attempt failed"
         ((attempt++))
+        sleep 2
     done
     
-    log "ERROR" "Failed to ensure sudo membership after $max_attempts attempts"
+    log "ERROR" "Failed to verify sudo membership after $max_attempts attempts"
     return 1
 }
 

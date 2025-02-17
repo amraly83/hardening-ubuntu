@@ -97,17 +97,25 @@ setup_admin_user() {
             if is_user_admin "$NEW_ADMIN_USER"; then
                 log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin" >&2
                 if prompt_yes_no "Would you like to use this existing admin user" "yes" >&2; then
-                    # Initialize sudo with simple test
+                    # Pre-setup verification steps
+                    log "DEBUG" "Running pre-verification setup..." >&2
+                    
+                    # Ensure basic PAM config exists
+                    if [[ ! -f "/etc/pam.d/sudo" ]] || ! grep -q "^auth.*sufficient.*pam_unix.so" "/etc/pam.d/sudo"; then
+                        log "DEBUG" "Creating basic PAM configuration" >&2
+                        echo "auth sufficient pam_unix.so" > "/etc/pam.d/sudo"
+                        chmod 644 "/etc/pam.d/sudo"
+                    fi
+                    
+                    # Initialize sudo
                     if [[ $EUID -eq 0 ]]; then
                         log "DEBUG" "Pre-initializing sudo access..." >&2
-                        usermod -aG sudo "$NEW_ADMIN_USER" 2>/dev/null || true
-                        echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
-                        chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
-                        
-                        # Quick sudo test
-                        if timeout 5 su -s /bin/bash - "$NEW_ADMIN_USER" -c "sudo -n true" >/dev/null 2>&1; then
+                        chmod +x "${SCRIPT_DIR}/init-sudo.sh"
+                        if "${SCRIPT_DIR}/init-sudo.sh" "$NEW_ADMIN_USER"; then
                             printf "%s" "$NEW_ADMIN_USER"
                             return 0
+                        else
+                            log "WARNING" "Initial sudo setup failed, continuing anyway" >&2
                         fi
                     fi
                     printf "%s" "$NEW_ADMIN_USER"
@@ -354,73 +362,39 @@ verify_admin_setup() {
     
     log "INFO" "Starting admin verification for $username"
     
-    # First verify user exists
+    # Verify user exists
     if ! id "$username" >/dev/null 2>&1; then
         log "ERROR" "User $username does not exist"
         return 1
     fi
     
-    # Configure PAM first
-    log "DEBUG" "Configuring PAM..."
-    chmod +x "${SCRIPT_DIR}/configure-pam.sh"
-    if ! "${SCRIPT_DIR}/configure-pam.sh"; then
-        log "WARNING" "PAM configuration failed, continuing with defaults"
+    # Step 1: Simple PAM configuration
+    log "DEBUG" "Setting up minimal PAM configuration..."
+    echo "auth sufficient pam_unix.so" > "/etc/pam.d/sudo"
+    chmod 644 "/etc/pam.d/sudo"
+    
+    # Step 2: Initialize sudo access using helper script
+    log "DEBUG" "Initializing sudo access..."
+    chmod +x "${SCRIPT_DIR}/init-sudo.sh"
+    if ! "${SCRIPT_DIR}/init-sudo.sh" "$username"; then
+        log "ERROR" "Failed to initialize sudo access"
+        return 1
     fi
     
-    # Step 1: Verify group membership
-    log "DEBUG" "Verifying sudo group membership"
+    # Verify final state
+    log "DEBUG" "Verifying final configuration..."
     if ! groups "$username" | grep -q '\bsudo\b'; then
-        usermod -aG sudo "$username"
-        # Force group update
-        su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
-        sleep 1
-        
-        if ! groups "$username" | grep -q '\bsudo\b'; then
-            log "ERROR" "Failed to add user to sudo group"
-            return 1
-        fi
+        log "ERROR" "User is not in sudo group after initialization"
+        return 1
     fi
-    log "SUCCESS" "User is in sudo group"
     
-    # Step 2: Set up initial sudo access
-    if [[ $EUID -eq 0 ]]; then
-        log "DEBUG" "Setting up initial sudo configuration"
-        
-        # Ensure sudoers.d exists
-        mkdir -p /etc/sudoers.d
-        chmod 750 /etc/sudoers.d
-        
-        # Create initial sudoers entry
-        local sudoers_file="/etc/sudoers.d/$username"
-        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudoers_file"
-        chmod 440 "$sudoers_file"
-        
-        # Quick initial sudo test
-        log "DEBUG" "Testing initial sudo access"
-        if timeout 10 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-            log "SUCCESS" "Initial sudo access verified"
-            
-            # Switch to password auth configuration
-            echo "$username ALL=(ALL:ALL) ALL" > "$sudoers_file"
-            chmod 440 "$sudoers_file"
-            log "SUCCESS" "Admin user setup verified"
-            return 0
-        else
-            log "ERROR" "Initial sudo test failed"
-            # Try one more time with a clean environment
-            sudo -K -u "$username" 2>/dev/null || true
-            if timeout 10 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
-                log "SUCCESS" "Sudo access verified after cleanup"
-                return 0
-            fi
-        fi
-        
-        log "ERROR" "Failed to verify sudo access"
-        return 1
-    else
-        log "ERROR" "Root privileges required for sudo initialization"
+    if ! test -f "/etc/sudoers.d/$username"; then
+        log "ERROR" "Sudoers configuration missing after initialization"
         return 1
     fi
+    
+    log "SUCCESS" "Admin user setup verified"
+    return 0
 }
 
 # Main setup process with progress tracking
