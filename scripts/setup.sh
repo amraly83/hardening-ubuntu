@@ -97,18 +97,18 @@ setup_admin_user() {
             if is_user_admin "$NEW_ADMIN_USER"; then
                 log "INFO" "User '$NEW_ADMIN_USER' already exists and is already an admin" >&2
                 if prompt_yes_no "Would you like to use this existing admin user" "yes" >&2; then
-                    # Initialize sudo before returning
+                    # Initialize sudo with simple test
                     if [[ $EUID -eq 0 ]]; then
                         log "DEBUG" "Pre-initializing sudo access..." >&2
-                        # Reset sudo timestamp
-                        sudo -K -u "$NEW_ADMIN_USER" 2>/dev/null || true
-                        # Ensure sudo group
                         usermod -aG sudo "$NEW_ADMIN_USER" 2>/dev/null || true
-                        # Create sudoers entry
                         echo "$NEW_ADMIN_USER ALL=(ALL:ALL) ALL" > "/etc/sudoers.d/$NEW_ADMIN_USER"
                         chmod 440 "/etc/sudoers.d/$NEW_ADMIN_USER"
-                        # Wait for changes to take effect
-                        sleep 2
+                        
+                        # Quick sudo test
+                        if timeout 5 su -s /bin/bash - "$NEW_ADMIN_USER" -c "sudo -n true" >/dev/null 2>&1; then
+                            printf "%s" "$NEW_ADMIN_USER"
+                            return 0
+                        fi
                     fi
                     printf "%s" "$NEW_ADMIN_USER"
                     return 0
@@ -500,26 +500,26 @@ main() {
         confirm_continue "System hardening"
     fi
     
-    # Final verification with timeout
+    # Final verification using standalone script
     log "INFO" "Running final verification..."
-    local verify_timeout=60
-    if ! timeout "$verify_timeout" verify_all_configurations "$USERNAME"; then
-        log "WARNING" "Final verification exceeded ${verify_timeout} seconds"
-        echo "Some verifications timed out but critical components are in place."
-        echo "You may want to manually verify:"
+    chmod +x "${SCRIPT_DIR}/verify-system.sh"
+    if ! timeout 60 "${SCRIPT_DIR}/verify-system.sh" "$USERNAME"; then
+        log "WARNING" "Some verifications failed"
+        echo "Please check the warnings above and verify manually:"
         echo "1. Try 'sudo -v' to check sudo access"
-        echo "2. Check SSH key login in a new terminal"
-        echo "3. Verify 2FA if enabled"
-        echo "4. Check service status with 'systemctl status sshd fail2ban'"
+        echo "2. SSH: ssh ${USERNAME}@localhost -p ${ssh_port:-22}"
+        echo "3. Run 'systemctl status sshd fail2ban' to check services"
+    else
+        log "SUCCESS" "System verification completed successfully"
     fi
     
-    # Always show final status regardless of verification result
+    # Show final status
     echo "=== Setup Complete ==="
     echo "IMPORTANT: Before logging out, please verify in a new terminal:"
-    echo "1. SSH access works with your key on port $SSH_PORT"
-    echo "2. 2FA works (if enabled)"
-    echo "3. Sudo access works with 'sudo -v'"
-    echo "4. Review generated documentation in ${SCRIPT_DIR}/../docs/"
+    echo "1. SSH access: ssh ${USERNAME}@localhost -p ${ssh_port:-22}"
+    echo "2. 2FA works (if enabled): You should be prompted for code"
+    echo "3. Sudo access: Run 'sudo -v' after login"
+    echo "4. Review documentation in ${SCRIPT_DIR}/../docs/"
     echo
     echo "If you experience any issues, refer to docs/troubleshooting.md"
     

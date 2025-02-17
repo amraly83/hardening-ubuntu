@@ -237,14 +237,12 @@ verify_sudo_access() {
         return 1
     fi
     
-    # Ensure verify-sudo.sh is executable
-    chmod +x "${SCRIPT_DIR}/verify-sudo.sh"
-    
-    # Try verification with dedicated script
+    # Try verification directly without using verify-sudo.sh
     while [[ $retry -lt $max_retries ]]; do
         log "DEBUG" "Attempting sudo verification (attempt $((retry + 1))/$max_retries)"
         
-        if "${SCRIPT_DIR}/verify-sudo.sh" "$username"; then
+        # Try direct sudo test
+        if timeout 10 su -s /bin/bash - "$username" -c "sudo -n true" >/dev/null 2>&1; then
             log "SUCCESS" "Sudo access verified for $username"
             return 0
         fi
@@ -260,8 +258,11 @@ verify_sudo_access() {
             echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
             chmod 440 "/etc/sudoers.d/$username"
             
-            # Refresh group membership
-            pkill -SIGHUP -u "$username" >/dev/null 2>&1 || true
+            # Reset sudo timestamp
+            sudo -K -u "$username" 2>/dev/null || true
+            
+            # Force group update without killing session
+            su -s /bin/bash - "$username" -c "newgrp sudo" >/dev/null 2>&1 || true
             sleep 2
         fi
         
@@ -328,39 +329,53 @@ verify_all_configurations() {
     local all_passed=true
     local verification_timeout=30  # Maximum seconds to wait for each verification
     
-    # Use timeout command for sudo verification
+    # Load configuration first
+    if [[ -f "/etc/server-hardening/hardening.conf" ]]; then
+        # shellcheck source=/dev/null
+        source "/etc/server-hardening/hardening.conf" || true
+    fi
+    
+    # Verify user exists and is in sudo group
+    if ! id "$username" >/dev/null 2>&1; then
+        log "ERROR" "User $username does not exist"
+        return 1
+    fi
+    
+    # Check sudo group membership and access
     log "INFO" "Verifying sudo access..."
-    if ! timeout "$verification_timeout" bash -c "verify_sudo_access '$username'" 2>/dev/null; then
-        log "WARNING" "Sudo access verification timed out or failed"
-        # Check if user is at least in sudo group
+    if timeout "$verification_timeout" bash -c "su -s /bin/bash - $username -c 'sudo -n true'" 2>/dev/null; then
+        log "SUCCESS" "Sudo access verified"
+    else
+        log "WARNING" "Sudo access verification failed"
         if groups "$username" | grep -q '\bsudo\b'; then
-            log "INFO" "User is in sudo group, continuing despite verification timeout"
+            log "INFO" "User is in sudo group, continuing despite verification failure"
         else
             log "ERROR" "User is not in sudo group"
             all_passed=false
         fi
     fi
     
-    # Quick SSH key check without verification
+    # Quick SSH key check
     log "INFO" "Verifying SSH key setup..."
-    if [[ ! -f "/home/${username}/.ssh/authorized_keys" ]] || [[ ! -s "/home/${username}/.ssh/authorized_keys" ]]; then
+    local auth_keys="/home/${username}/.ssh/authorized_keys"
+    if [[ ! -f "$auth_keys" ]] || [[ ! -s "$auth_keys" ]]; then
         log "WARNING" "SSH key verification failed"
         all_passed=false
     fi
     
-    # Quick 2FA check without verification
+    # Quick 2FA check if enabled
     if [[ -f "/home/${username}/.google_authenticator" ]]; then
         log "INFO" "Verifying 2FA configuration..."
-        if ! grep -q "auth required pam_google_authenticator.so" /etc/pam.d/sshd 2>/dev/null; then
+        if ! grep -q "auth.*pam_google_authenticator.so" /etc/pam.d/sshd 2>/dev/null; then
             log "WARNING" "2FA configuration incomplete"
             all_passed=false
         fi
     fi
     
-    # Basic service checks
+    # Service checks
     log "INFO" "Verifying system services..."
-    local required_services=(sshd fail2ban)
-    for service in "${required_services[@]}"; do
+    local services=("sshd" "fail2ban")
+    for service in "${services[@]}"; do
         if ! systemctl is-active --quiet "$service" 2>/dev/null; then
             log "WARNING" "Service $service is not running"
             all_passed=false
@@ -368,18 +383,21 @@ verify_all_configurations() {
     done
     
     # Quick firewall check
+    log "INFO" "Verifying firewall..."
     if ! ufw status | grep -q "Status: active" 2>/dev/null; then
         log "WARNING" "Firewall is not active"
         all_passed=false
     fi
     
+    # Final status
     if [[ "$all_passed" == "true" ]]; then
         log "SUCCESS" "All critical configurations verified"
     else
         log "WARNING" "Some verifications failed but may not be critical"
     fi
     
-    return 0  # Return success even with warnings to prevent script hang
+    # Return success to prevent script hang
+    return 0
 }
 
 # Add new function for sudo group handling

@@ -228,74 +228,47 @@ validate_pam_config() {
 configure_pam() {
     log "INFO" "Configuring PAM for sudo and su..."
     
-    # Use timeout for the entire PAM configuration process
-    (
-        # Backup PAM files first
-        backup_file "/etc/pam.d/sudo"
-        backup_file "/etc/pam.d/su"
-        
-        # Create a basic sudo PAM config that should work reliably
-        cat > "/etc/pam.d/sudo" << 'EOF'
+    # Backup PAM files first
+    backup_file "/etc/pam.d/sudo"
+    backup_file "/etc/pam.d/su"
+    
+    # Create a minimal but reliable sudo PAM config
+    cat > "/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-auth       required      pam_unix.so
-@include common-auth
-@include common-account
-@include common-session
-EOF
-        chmod 644 "/etc/pam.d/sudo"
-        
-        # Create a basic su PAM config
-        cat > "/etc/pam.d/su" << 'EOF'
-#%PAM-1.0
-auth       sufficient   pam_rootok.so
 auth       include      common-auth
+account    include      common-account
 password   include      common-password
+session    required     pam_env.so readenv=1 user_readenv=0
+session    required     pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+session    required     pam_unix.so
 session    include      common-session
 EOF
-        chmod 644 "/etc/pam.d/su"
-        
-        # Validate the configuration
-        if ! validate_pam_config "/etc/pam.d/sudo"; then
-            log "WARNING" "PAM configuration validation failed, restoring from backup"
-            restore_from_backup "/etc/pam.d/sudo"
-            restore_from_backup "/etc/pam.d/su"
-            return 1
-        fi
-        
-        log "SUCCESS" "PAM configuration updated"
-        return 0
-    ) & # Run in background
+    chmod 644 "/etc/pam.d/sudo"
     
-    # Wait for PAM configuration with timeout
-    local config_pid=$!
-    local timeout=30
+    # Create minimal su PAM config
+    cat > "/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+auth       sufficient   pam_rootok.so
+auth       required     pam_unix.so
+account    required     pam_unix.so
+session    required     pam_unix.so
+session    include      common-session
+EOF
+    chmod 644 "/etc/pam.d/su"
     
-    # Wait for completion or timeout
-    if ! wait_with_timeout "$config_pid" "$timeout"; then
-        log "WARNING" "PAM configuration timed out, killing process"
-        kill "$config_pid" 2>/dev/null || true
-        return 1
+    # Create or update common-auth if needed
+    if [[ ! -f "/etc/pam.d/common-auth" ]]; then
+        cat > "/etc/pam.d/common-auth" << 'EOF'
+#%PAM-1.0
+auth    [success=1 default=ignore]  pam_unix.so nullok_secure try_first_pass
+auth    requisite                   pam_deny.so
+auth    required                    pam_permit.so
+EOF
+        chmod 644 "/etc/pam.d/common-auth"
     fi
     
+    log "SUCCESS" "PAM configuration updated"
     return 0
-}
-
-# Helper function to wait for a process with timeout
-wait_with_timeout() {
-    local pid=$1
-    local timeout=$2
-    local count=0
-    
-    while [ $count -lt "$timeout" ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            wait "$pid"
-            return $?
-        fi
-        sleep 1
-        ((count++))
-    done
-    
-    return 1
 }
 
 configure_sudo() {
@@ -304,23 +277,26 @@ configure_sudo() {
     # Create temporary files for validation first
     local temp_sudo_config=$(mktemp)
     
-    # Basic sudo configuration
+    # Basic sudo configuration that works reliably with passwords
     cat > "$temp_sudo_config" << 'EOF'
-# Default sudo configuration
+# Basic sudo configuration
 Defaults        env_reset
 Defaults        mail_badpass
-Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Defaults        use_pty
 Defaults        timestamp_timeout=15
+Defaults        passwd_tries=3
+Defaults        authenticate
 
-# Allow sudo group full access
+# Allow sudo group access with password
 %sudo   ALL=(ALL:ALL) ALL
 
-# Disable tty requirement for sudo group
-Defaults:%sudo !requiretty
+# This prevents SSH sessions timing out when using sudo
+Defaults        env_keep += "SSH_AUTH_SOCK"
 
-# Keep essential environment variables
-Defaults env_keep += "LANG LC_* EDITOR DISPLAY XAUTHORITY SSH_AUTH_SOCK"
+# This allows sudo group members to run sudo without a password for some basic commands
+%sudo   ALL=(ALL) NOPASSWD: /usr/bin/sudo -l, /usr/bin/sudo -v, /usr/bin/id
+
+# Keep a minimal secure environment
+Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EOF
 
     # Validate syntax before installing
@@ -383,9 +359,36 @@ cleanup_hung_processes() {
     return 0
 }
 
+# Helper function to ensure we have a valid configuration
+ensure_hardening_config() {
+    local config_file="/etc/server-hardening/hardening.conf"
+    
+    # Set default values
+    SSH_PORT=${SSH_PORT:-22}
+    SSH_ALLOW_USERS=${SSH_ALLOW_USERS:-}
+    ADMIN_EMAIL=${ADMIN_EMAIL:-root@localhost}
+    FIREWALL_ADDITIONAL_PORTS=${FIREWALL_ADDITIONAL_PORTS:-"80,443"}
+    MFA_ENABLED=${MFA_ENABLED:-yes}
+    ENABLE_AUTO_UPDATES=${ENABLE_AUTO_UPDATES:-yes}
+    ENABLE_IPV6=${ENABLE_IPV6:-no}
+    
+    # Try to load config if it exists
+    if [[ -f "$config_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$config_file" || true
+    fi
+    
+    # Export variables so they're available to subshells
+    export SSH_PORT SSH_ALLOW_USERS ADMIN_EMAIL FIREWALL_ADDITIONAL_PORTS
+    export MFA_ENABLED ENABLE_AUTO_UPDATES ENABLE_IPV6
+}
+
 main() {
     # Add cleanup trap
     trap cleanup_hung_processes EXIT
+    
+    # Ensure we have configuration values before anything else
+    ensure_hardening_config
 
     if [[ "${1:-}" == "--restore" ]]; then
         log "INFO" "Restoring configuration from backups..."
