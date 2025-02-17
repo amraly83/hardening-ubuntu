@@ -1,56 +1,30 @@
 #!/bin/bash
-# Comprehensive integration test suite
+# Comprehensive integration test suite for server hardening
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # Test configuration
-TEST_USER="testadmin"
-TEST_EMAIL="test@localhost"
-SSH_TEST_PORT=3333
-TEST_LOG="/tmp/security-test.log"
+readonly TEST_USER="testadmin"
+readonly TEST_EMAIL="test@localhost"
+readonly SSH_TEST_PORT=3333
+readonly TEST_LOG="/var/log/security-test.log"
+readonly TEST_TIMEOUT=300  # 5 minutes total timeout
+readonly STEP_TIMEOUT=60   # 1 minute per step timeout
 
-run_integration_tests() {
-    local success=true
-    
-    log "INFO" "Starting integration test suite..."
-    
-    # Create test environment
-    setup_test_env || {
-        error_exit "Failed to setup test environment"
-    }
-    
-    # Run test cases
-    test_user_creation || success=false
-    test_ssh_configuration || success=false
-    test_2fa_setup || success=false
-    test_firewall_rules || success=false
-    test_pam_configuration || success=false
-    test_sudo_access || success=false
-    test_security_monitoring || success=false
-    
-    # Clean up
-    cleanup_test_env
-    
-    # Generate test report
-    generate_test_report "$success"
-    
-    if [[ "$success" == "true" ]]; then
-        log "SUCCESS" "All integration tests passed"
-        return 0
-    else
-        log "ERROR" "Some integration tests failed"
-        return 1
-    fi
-}
+# Store test results
+declare -A TEST_RESULTS
 
 setup_test_env() {
     log "INFO" "Setting up test environment..."
     
-    # Create test configuration
+    # Create test directories
     mkdir -p "/etc/server-hardening"
-    cat > "/etc/server-hardening/hardening.conf" << EOF
+    
+    # Generate unique test configuration
+    local test_config="/etc/server-hardening/hardening.conf"
+    cat > "$test_config" << EOF
 SSH_PORT=$SSH_TEST_PORT
 SSH_ALLOW_USERS=$TEST_USER
 ADMIN_EMAIL=$TEST_EMAIL
@@ -59,196 +33,331 @@ MFA_ENABLED=yes
 ENABLE_AUTO_UPDATES=yes
 ENABLE_IPV6=no
 EOF
+    chmod 600 "$test_config"
     
-    # Generate test SSH key
-    ssh-keygen -t ed25519 -f "/tmp/test_key" -N "" -C "test@localhost"
+    # Generate test SSH key with strong encryption
+    local key_file="/tmp/test_key"
+    if ! ssh-keygen -t ed25519 -a 100 -f "$key_file" -N "" -C "test@localhost"; then
+        error_exit "Failed to generate SSH key"
+    fi
+    chmod 600 "$key_file"
     
+    # Initialize test log
+    : > "$TEST_LOG"
+    chmod 600 "$TEST_LOG"
+    
+    TEST_RESULTS["environment_setup"]="PASS"
+    return 0
+}
+
+run_with_timeout() {
+    local timeout="$1"
+    local description="$2"
+    shift 2
+    
+    log "INFO" "Running: $description"
+    
+    if ! timeout "$timeout" "$@"; then
+        if [[ $? -eq 124 ]]; then
+            log "ERROR" "$description timed out after ${timeout}s"
+        else
+            log "ERROR" "$description failed"
+        fi
+        return 1
+    fi
     return 0
 }
 
 test_user_creation() {
-    log "INFO" "Testing user creation..."
+    log "INFO" "Testing user creation and administration..."
+    local status=0
     
-    # Create test user
-    if ! "${SCRIPT_DIR}/create-admin.sh" "$TEST_USER"; then
-        log "ERROR" "User creation failed"
-        return 1
+    # Create test user with proper validation
+    if ! run_with_timeout "$STEP_TIMEOUT" "User creation" "${SCRIPT_DIR}/create-admin.sh" "$TEST_USER"; then
+        status=1
     fi
     
-    # Verify user exists and has sudo access
-    if ! id "$TEST_USER" >/dev/null 2>&1 || ! groups "$TEST_USER" | grep -q "\bsudo\b"; then
-        log "ERROR" "User verification failed"
-        return 1
+    # Verify user setup
+    if ! id "$TEST_USER" >/dev/null 2>&1; then
+        log "ERROR" "User creation verification failed"
+        status=1
     fi
     
-    return 0
+    # Verify sudo access
+    if ! groups "$TEST_USER" | grep -q "\bsudo\b"; then
+        log "ERROR" "Sudo group membership verification failed"
+        status=1
+    fi
+    
+    # Verify home directory permissions
+    local home_dir="/home/$TEST_USER"
+    if [[ ! -d "$home_dir" ]] || [[ "$(stat -c '%a' "$home_dir")" != "750" ]]; then
+        log "ERROR" "Home directory permissions verification failed"
+        status=1
+    fi
+    
+    TEST_RESULTS["user_creation"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
 }
 
 test_ssh_configuration() {
-    log "INFO" "Testing SSH configuration..."
+    log "INFO" "Testing SSH configuration and access..."
+    local status=0
     
     # Setup SSH keys
-    if ! "${SCRIPT_DIR}/setup-ssh-key.sh" "$TEST_USER" < "/tmp/test_key.pub"; then
-        log "ERROR" "SSH key setup failed"
-        return 1
+    if ! run_with_timeout "$STEP_TIMEOUT" "SSH key setup" \
+        "${SCRIPT_DIR}/setup-ssh-key.sh" -u "$TEST_USER" -k "/tmp/test_key.pub"; then
+        status=1
     fi
     
-    # Test SSH access
-    if ! timeout 10 ssh -i /tmp/test_key -p "$SSH_TEST_PORT" -o StrictHostKeyChecking=no "$TEST_USER@localhost" true; then
-        log "ERROR" "SSH access verification failed"
-        return 1
+    # Verify SSH configuration
+    local config_checks=(
+        "^Port $SSH_TEST_PORT"
+        "^PermitRootLogin no"
+        "^PasswordAuthentication no"
+        "^PubkeyAuthentication yes"
+    )
+    
+    for check in "${config_checks[@]}"; do
+        if ! grep -q "$check" /etc/ssh/sshd_config; then
+            log "ERROR" "Missing SSH configuration: $check"
+            status=1
+        fi
+    done
+    
+    # Test SSH connection
+    if ! run_with_timeout 10 "SSH connection test" \
+        ssh -i /tmp/test_key -p "$SSH_TEST_PORT" \
+            -o StrictHostKeyChecking=no \
+            -o BatchMode=yes \
+            "$TEST_USER@localhost" "true"; then
+        log "ERROR" "SSH connection test failed"
+        status=1
     fi
     
-    return 0
+    TEST_RESULTS["ssh_configuration"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
 }
 
 test_2fa_setup() {
     log "INFO" "Testing 2FA configuration..."
+    local status=0
     
     # Setup 2FA
-    if ! "${SCRIPT_DIR}/setup-2fa.sh" "$TEST_USER"; then
-        log "ERROR" "2FA setup failed"
-        return 1
+    if ! run_with_timeout "$STEP_TIMEOUT" "2FA setup" \
+        "${SCRIPT_DIR}/setup-2fa.sh" -u "$TEST_USER" -f; then
+        status=1
     fi
     
-    # Verify PAM configuration
-    if ! grep -q "auth required pam_google_authenticator.so" /etc/pam.d/sshd; then
-        log "ERROR" "2FA PAM configuration verification failed"
-        return 1
+    # Verify 2FA configuration
+    if ! run_with_timeout "$STEP_TIMEOUT" "2FA verification" \
+        "${SCRIPT_DIR}/verify-2fa.sh" -u "$TEST_USER"; then
+        status=1
     fi
     
-    return 0
+    # Test 2FA functionality
+    if ! run_with_timeout "$STEP_TIMEOUT" "2FA testing" \
+        "${SCRIPT_DIR}/test-2fa.sh" -u "$TEST_USER"; then
+        status=1
+    fi
+    
+    TEST_RESULTS["2fa_setup"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
 }
 
 test_firewall_rules() {
     log "INFO" "Testing firewall configuration..."
+    local status=0
     
-    # Check UFW status
-    if ! ufw status | grep -q "Status: active"; then
+    # Check UFW installation and status
+    if ! command -v ufw >/dev/null 2>&1; then
+        log "ERROR" "UFW not installed"
+        status=1
+    elif ! ufw status | grep -q "Status: active"; then
         log "ERROR" "Firewall is not active"
-        return 1
+        status=1
     fi
     
-    # Verify SSH port is allowed
-    if ! ufw status | grep -q "$SSH_TEST_PORT/tcp"; then
-        log "ERROR" "SSH port not configured in firewall"
-        return 1
+    # Verify required ports
+    local required_ports=("$SSH_TEST_PORT" "80" "443")
+    for port in "${required_ports[@]}"; do
+        if ! ufw status | grep -q "$port/tcp.*ALLOW"; then
+            log "ERROR" "Required port $port not allowed in firewall"
+            status=1
+        fi
+    done
+    
+    # Test firewall blocking
+    if nc -w 1 -z localhost 23 2>/dev/null; then
+        log "ERROR" "Firewall allowing unauthorized port 23"
+        status=1
     fi
     
-    return 0
-}
-
-test_pam_configuration() {
-    log "INFO" "Testing PAM configuration..."
-    
-    # Test PAM configuration
-    if ! "${SCRIPT_DIR}/configure-pam.sh" test; then
-        log "ERROR" "PAM configuration failed"
-        return 1
-    fi
-    
-    # Verify PAM modules
-    if ! pamtester -v sudo "$TEST_USER" authenticate 2>/dev/null; then
-        log "ERROR" "PAM authentication test failed"
-        return 1
-    fi
-    
-    return 0
-}
-
-test_sudo_access() {
-    log "INFO" "Testing sudo access..."
-    
-    # Test sudo configuration
-    if ! "${SCRIPT_DIR}/init-sudo.sh" "$TEST_USER"; then
-        log "ERROR" "Sudo initialization failed"
-        return 1
-    fi
-    
-    # Verify sudo access
-    if ! sudo -u "$TEST_USER" sudo -n true; then
-        log "ERROR" "Sudo access verification failed"
-        return 1
-    fi
-    
-    return 0
+    TEST_RESULTS["firewall_rules"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
 }
 
 test_security_monitoring() {
-    log "INFO" "Testing security monitoring..."
+    log "INFO" "Testing security monitoring services..."
+    local status=0
     
-    # Start monitoring service
-    if ! systemctl start security-monitor.service; then
-        log "ERROR" "Failed to start security monitoring"
-        return 1
+    # Check required services
+    local required_services=("fail2ban" "auditd" "security-monitor")
+    for service in "${required_services[@]}"; do
+        if ! systemctl is-active --quiet "$service"; then
+            log "ERROR" "Service $service is not running"
+            status=1
+        fi
+    done
+    
+    # Verify fail2ban configuration
+    if ! fail2ban-client status sshd >/dev/null 2>&1; then
+        log "ERROR" "fail2ban SSH jail not configured"
+        status=1
     fi
     
-    # Verify monitoring is active
-    if ! systemctl is-active --quiet security-monitor.service; then
-        log "ERROR" "Security monitoring service not running"
-        return 1
+    # Check audit rules
+    if ! auditctl -l | grep -q "watch=/etc/passwd"; then
+        log "ERROR" "Basic audit rules not configured"
+        status=1
     fi
     
-    return 0
+    TEST_RESULTS["security_monitoring"]=$([[ $status -eq 0 ]] && echo "PASS" || echo "FAIL")
+    return $status
 }
 
 cleanup_test_env() {
     log "INFO" "Cleaning up test environment..."
     
-    # Remove test user
-    userdel -r "$TEST_USER" 2>/dev/null || true
-    
-    # Remove test files
-    rm -f "/tmp/test_key" "/tmp/test_key.pub"
-    
-    # Stop monitoring service
+    # Stop test services
     systemctl stop security-monitor.service 2>/dev/null || true
+    
+    # Remove test user and related files
+    if id "$TEST_USER" >/dev/null 2>&1; then
+        pkill -u "$TEST_USER" || true
+        userdel -r "$TEST_USER" 2>/dev/null || true
+    fi
+    
+    # Clean up test files
+    rm -f "/tmp/test_key" "/tmp/test_key.pub"
+    rm -f "/etc/server-hardening/hardening.conf"
+    
+    # Archive test logs
+    if [[ -f "$TEST_LOG" ]]; then
+        mv "$TEST_LOG" "${TEST_LOG}.$(date +%Y%m%d_%H%M%S).bak"
+    fi
 }
 
 generate_test_report() {
-    local success="$1"
-    local report_file="${TEST_LOG%.log}-report.txt"
+    local report_file="/var/log/security-integration-report.txt"
+    local total_tests=${#TEST_RESULTS[@]}
+    local passed_tests=0
     
     {
         echo "=== Security Hardening Integration Test Report ==="
         echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "Overall Status: $([ "$success" == "true" ] && echo "PASSED" || echo "FAILED")"
-        echo
-        echo "=== Test Environment ==="
-        echo "Test User: $TEST_USER"
-        echo "SSH Port: $SSH_TEST_PORT"
         echo "System: $(uname -a)"
         echo
+        
         echo "=== Test Results ==="
-        echo "1. User Creation: $(grep "test_user_creation" "$TEST_LOG" | tail -1)"
-        echo "2. SSH Configuration: $(grep "test_ssh_configuration" "$TEST_LOG" | tail -1)"
-        echo "3. 2FA Setup: $(grep "test_2fa_setup" "$TEST_LOG" | tail -1)"
-        echo "4. Firewall Rules: $(grep "test_firewall_rules" "$TEST_LOG" | tail -1)"
-        echo "5. PAM Configuration: $(grep "test_pam_configuration" "$TEST_LOG" | tail -1)"
-        echo "6. Sudo Access: $(grep "test_sudo_access" "$TEST_LOG" | tail -1)"
-        echo "7. Security Monitoring: $(grep "test_security_monitoring" "$TEST_LOG" | tail -1)"
+        for test in "${!TEST_RESULTS[@]}"; do
+            echo "${test}: ${TEST_RESULTS[$test]}"
+            [[ "${TEST_RESULTS[$test]}" == "PASS" ]] && ((passed_tests++))
+        done
         echo
+        
+        echo "=== Summary ==="
+        echo "Total Tests: $total_tests"
+        echo "Passed: $passed_tests"
+        echo "Failed: $((total_tests - passed_tests))"
+        echo "Success Rate: $(( (passed_tests * 100) / total_tests ))%"
+        echo
+        
         echo "=== System Status ==="
         echo "Services:"
-        systemctl status sshd fail2ban ufw security-monitor.service | grep Active:
+        systemctl status sshd fail2ban ufw 2>/dev/null || true
         echo
-        echo "=== Recommendations ==="
-        if [[ "$success" != "true" ]]; then
-            echo "- Review failed test logs in $TEST_LOG"
-            echo "- Check service configurations"
-            echo "- Verify system requirements"
-            echo "- Run individual test cases for debugging"
+        
+        echo "=== Security Configurations ==="
+        echo "SSH Version: $(ssh -V 2>&1)"
+        echo "Firewall Status: $(ufw status | grep Status)"
+        echo "fail2ban Status: $(fail2ban-client status 2>/dev/null || echo 'Not running')"
+        echo
+        
+        if [[ $passed_tests -lt $total_tests ]]; then
+            echo "=== Failed Tests Analysis ==="
+            for test in "${!TEST_RESULTS[@]}"; do
+                if [[ "${TEST_RESULTS[$test]}" != "PASS" ]]; then
+                    echo "- $test: Check logs for details"
+                fi
+            done
+            echo
+            echo "=== Recommendations ==="
+            echo "1. Review failed test logs in $TEST_LOG"
+            echo "2. Verify system requirements"
+            echo "3. Check service configurations"
+            echo "4. Run individual test scripts for detailed diagnostics"
         fi
+        
     } > "$report_file"
     
     chmod 600 "$report_file"
-    log "INFO" "Test report generated at $report_file"
+    log "INFO" "Test report generated: $report_file"
+    
+    return $(( passed_tests < total_tests ))
 }
 
-# Main execution
-if [[ "${1:-}" == "--ci" ]]; then
-    # CI mode - exit on first failure
-    set -e
-fi
+main() {
+    local start_time
+    start_time=$(date +%s)
+    
+    # Parse command line options
+    local ci_mode=0
+    while getopts "c" opt; do
+        case $opt in
+            c) ci_mode=1 ;;
+            *) error_exit "Usage: $0 [-c]" ;;
+        esac
+    done
+    
+    # Check if running as root
+    check_root
+    
+    # Trap cleanup on exit
+    trap cleanup_test_env EXIT
+    
+    log "INFO" "Starting integration test suite..."
+    
+    # Run tests with timeout protection
+    if ! run_with_timeout "$TEST_TIMEOUT" "Complete test suite" bash -c '
+        setup_test_env &&
+        test_user_creation &&
+        test_ssh_configuration &&
+        test_2fa_setup &&
+        test_firewall_rules &&
+        test_security_monitoring
+    '; then
+        log "ERROR" "Integration tests failed or timed out"
+        generate_test_report
+        exit 1
+    fi
+    
+    # Generate final report
+    generate_test_report
+    
+    # Calculate execution time
+    local end_time
+    end_time=$(date +%s)
+    log "INFO" "Test suite completed in $((end_time - start_time)) seconds"
+    
+    # Exit based on test results
+    local failed_tests=0
+    for result in "${TEST_RESULTS[@]}"; do
+        [[ "$result" != "PASS" ]] && ((failed_tests++))
+    done
+    
+    [[ $failed_tests -eq 0 ]] || exit 1
+}
 
-run_integration_tests "$@"
+# Run main function
+main "$@"

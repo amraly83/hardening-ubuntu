@@ -1,35 +1,68 @@
 #!/bin/bash
-# Setup 2FA (Google Authenticator) for the newly created admin user
+# Setup 2FA (Google Authenticator) for system users
 set -euo pipefail
-
-# Fix line endings for this script first
-sed -i 's/\r$//' "${BASH_SOURCE[0]}"
-chmod +x "${BASH_SOURCE[0]}"
 
 # Get absolute path of script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Colors for output
-readonly COLOR_GREEN='\033[1;32m'
-readonly COLOR_RED='\033[1;31m'
-readonly COLOR_YELLOW='\033[1;33m'
-readonly COLOR_CYAN='\033[1;36m'
-readonly COLOR_RESET='\033[0m'
+# Constants for Google Authenticator settings
+readonly GA_WINDOW_SIZE=3        # Allow 3 tokens before/after current one
+readonly GA_RATE_LIMIT=3         # Max 3 login attempts per 30 seconds
+readonly GA_RATE_TIME=30         # Time window for rate limiting (seconds)
+readonly GA_DISALLOW_REUSE=1     # Disallow token reuse
+readonly GA_TOKENS_LAG=1         # Emergency scratch codes
 
-# Source common functions
-if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
-    sed -i 's/\r$//' "${SCRIPT_DIR}/common.sh"
-    source "${SCRIPT_DIR}/common.sh"
-fi
+# Function to install required packages
+install_dependencies() {
+    local pkg="libpam-google-authenticator"
+    local max_retries=3
+    local retry=0
+    local delay=5
+    
+    log "INFO" "Installing required packages..."
+    
+    while (( retry < max_retries )); do
+        if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+            if apt-get update && apt-get install -y "$pkg"; then
+                log "SUCCESS" "Package installation completed"
+                return 0
+            fi
+        fi
+        
+        log "WARNING" "Package manager is locked or installation failed, retrying in $delay seconds..."
+        sleep "$delay"
+        (( retry++ ))
+        (( delay *= 2 ))
+    done
+    
+    error_exit "Failed to install required packages after $max_retries attempts"
+}
 
 # Function to configure PAM for 2FA
 configure_pam_2fa() {
     local pam_file="/etc/pam.d/sshd"
-    backup_file "$pam_file"
+    local pam_backup="${pam_file}.pre2fa"
     
-    # Add Google Authenticator PAM configuration
+    log "INFO" "Configuring PAM for 2FA..."
+    
+    # Create backup if it doesn't exist
+    if [[ ! -f "$pam_backup" ]]; then
+        cp -p "$pam_file" "$pam_backup"
+    fi
+    
+    # Remove any existing Google Authenticator configuration
     sed -i '/^auth.*pam_google_authenticator.so/d' "$pam_file"
+    
+    # Add new configuration at the beginning
     sed -i '1i auth required pam_google_authenticator.so' "$pam_file"
+    
+    # Verify PAM configuration
+    if ! pam-auth-update --verify >/dev/null 2>&1; then
+        log "ERROR" "Invalid PAM configuration"
+        restore_from_backup "$pam_file" "$pam_backup"
+        return 1
+    fi
     
     return 0
 }
@@ -37,103 +70,199 @@ configure_pam_2fa() {
 # Function to configure SSH for 2FA
 configure_ssh_2fa() {
     local sshd_config="/etc/ssh/sshd_config"
-    backup_file "$sshd_config"
+    local config_backup="${sshd_config}.pre2fa"
     
-    # Update SSH configuration
-    sed -i 's/^ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' "$sshd_config"
-    sed -i 's/^AuthenticationMethods.*/AuthenticationMethods publickey,keyboard-interactive/' "$sshd_config"
+    log "INFO" "Configuring SSH for 2FA..."
     
-    if ! grep -q "^ChallengeResponseAuthentication" "$sshd_config"; then
-        echo "ChallengeResponseAuthentication yes" >> "$sshd_config"
-    fi
-    if ! grep -q "^AuthenticationMethods" "$sshd_config"; then
-        echo "AuthenticationMethods publickey,keyboard-interactive" >> "$sshd_config"
+    # Create backup if it doesn't exist
+    if [[ ! -f "$config_backup" ]]; then
+        cp -p "$sshd_config" "$config_backup"
     fi
     
-    # Verify configuration
+    # Update SSH configuration with proper options
+    local settings=(
+        "ChallengeResponseAuthentication yes"
+        "AuthenticationMethods publickey,keyboard-interactive"
+        "KbdInteractiveAuthentication yes"
+        "UsePAM yes"
+    )
+    
+    # Apply settings
+    for setting in "${settings[@]}"; do
+        local key="${setting%% *}"
+        sed -i "/^${key}/d" "$sshd_config"
+        echo "$setting" >> "$sshd_config"
+    done
+    
+    # Verify SSH configuration
     if ! sshd -t; then
         log "ERROR" "Invalid SSH configuration"
+        restore_from_backup "$sshd_config" "$config_backup"
         return 1
     fi
     
     return 0
 }
 
-# Main function
-main() {
-    check_root
+# Function to set up Google Authenticator for a user
+setup_google_auth() {
+    local username="$1"
+    local ga_file="/home/${username}/.google_authenticator"
     
-    if [[ $# -ne 1 ]]; then
-        log "ERROR" "Usage: $0 <admin_username>"
-        exit 1
+    log "INFO" "Setting up Google Authenticator for $username..."
+    
+    # Generate Google Authenticator configuration
+    local ga_options=(
+        "--time-based"                     # TOTP instead of HOTP
+        "--disallow-reuse"                 # Prevent token reuse
+        "--force"                          # Don't prompt for confirmation
+        "--rate-limit=${GA_RATE_LIMIT}"    # Rate limiting attempts
+        "--rate-time=${GA_RATE_TIME}"      # Rate limiting window
+        "--window-size=${GA_WINDOW_SIZE}"  # Allow some clock skew
+        "--emergency-codes=${GA_TOKENS_LAG}" # Emergency scratch codes
+    )
+    
+    if ! su -c "google-authenticator ${ga_options[*]}" - "$username"; then
+        error_exit "Failed to set up Google Authenticator for $username"
     fi
     
-    local admin_user="$1"
+    # Set proper permissions
+    chmod 400 "$ga_file"
+    chown "${username}:${username}" "$ga_file"
     
-    # Validate admin user
+    return 0
+}
+
+# Function to verify 2FA setup
+verify_2fa_setup() {
+    local username="$1"
+    local ga_file="/home/${username}/.google_authenticator"
+    
+    # Check file existence and permissions
+    if [[ ! -f "$ga_file" ]]; then
+        return 1
+    fi
+    
+    # Verify file permissions
+    local perms
+    perms=$(stat -c "%a" "$ga_file")
+    if [[ "$perms" != "400" ]]; then
+        return 1
+    fi
+    
+    # Check PAM configuration
+    if ! grep -q "^auth.*pam_google_authenticator.so" /etc/pam.d/sshd; then
+        return 1
+    fi
+    
+    # Check SSH configuration
+    if ! grep -q "^AuthenticationMethods.*keyboard-interactive" /etc/ssh/sshd_config; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to test 2FA configuration
+test_2fa_config() {
+    local username="$1"
+    local test_command="ssh -o PreferredAuthentications=keyboard-interactive -o BatchMode=no ${username}@localhost echo 'Test successful'"
+    
+    log "INFO" "Testing 2FA configuration..."
+    
+    if timeout 5 "$test_command" >/dev/null 2>&1; then
+        log "ERROR" "2FA test failed - connection succeeded without 2FA"
+        return 1
+    elif [[ $? -eq 124 ]]; then
+        # Timeout means we got a 2FA prompt, which is good
+        log "SUCCESS" "2FA prompt verified"
+        return 0
+    else
+        log "SUCCESS" "2FA configuration verified"
+        return 0
+    fi
+}
+
+# Main function
+main() {
+    local admin_user=""
+    local force_setup=0
+    
+    # Parse command line options
+    while getopts "u:f" opt; do
+        case $opt in
+            u) admin_user="$OPTARG" ;;
+            f) force_setup=1 ;;
+            *) error_exit "Usage: $0 -u <username> [-f]" ;;
+        esac
+    done
+    
+    if [[ -z "$admin_user" ]]; then
+        error_exit "Username is required. Usage: $0 -u <username> [-f]"
+    fi
+    
+    # Verify root access
+    check_root
+    
+    # Validate user
+    if ! validate_username "$admin_user"; then
+        error_exit "Invalid username format: $admin_user"
+    fi
+    
     if ! id "$admin_user" >/dev/null 2>&1; then
-        log "ERROR" "Admin user $admin_user does not exist"
-        exit 1
+        error_exit "User $admin_user does not exist"
     fi
     
     if ! is_user_admin "$admin_user"; then
-        log "ERROR" "User $admin_user is not an admin user"
-        exit 1
+        error_exit "User $admin_user is not an admin user"
     fi
     
-    echo -e "\n${COLOR_CYAN}Setting up 2FA for admin user: $admin_user${COLOR_RESET}"
-    
     # Check if 2FA is already configured
-    if [[ -f "/home/${admin_user}/.google_authenticator" ]]; then
+    if [[ $force_setup -eq 0 ]] && verify_2fa_setup "$admin_user"; then
         log "WARNING" "2FA is already configured for $admin_user"
         if ! prompt_yes_no "Would you like to reconfigure 2FA" "no"; then
             exit 0
         fi
     fi
     
-    # Install Google Authenticator if needed
+    # Install dependencies
     if ! command -v google-authenticator >/dev/null 2>&1; then
-        log "INFO" "Installing Google Authenticator PAM module..."
-        apt-get update && apt-get install -y libpam-google-authenticator
+        install_dependencies
     fi
     
-    # Configure PAM
-    log "INFO" "Configuring PAM for 2FA..."
-    if ! configure_pam_2fa; then
-        log "ERROR" "Failed to configure PAM"
+    # Configure PAM and SSH with rollback on failure
+    if ! configure_pam_2fa || ! configure_ssh_2fa; then
+        log "ERROR" "Failed to configure 2FA"
         exit 1
     fi
     
-    # Configure SSH
-    log "INFO" "Configuring SSH for 2FA..."
-    if ! configure_ssh_2fa; then
-        log "ERROR" "Failed to configure SSH"
-        exit 1
-    fi
-    
-    # Set up Google Authenticator for the admin user
-    echo -e "\n${COLOR_CYAN}Setting up Google Authenticator for $admin_user...${COLOR_RESET}"
-    echo "Please follow the prompts to configure your 2FA device"
-    
-    # Run google-authenticator as the admin user
-    if ! su -c "google-authenticator -t -d -f -r 3 -R 30 -w 3" - "$admin_user"; then
+    # Set up Google Authenticator
+    if ! setup_google_auth "$admin_user"; then
         log "ERROR" "Failed to set up Google Authenticator"
         exit 1
     fi
     
-    # Set proper permissions
-    chmod 400 "/home/${admin_user}/.google_authenticator"
-    chown "${admin_user}:${admin_user}" "/home/${admin_user}/.google_authenticator"
-    
     # Restart SSH service
-    systemctl restart sshd
+    systemctl restart sshd || error_exit "Failed to restart SSH service"
     
-    echo -e "\n${COLOR_GREEN}2FA setup completed successfully for admin user: $admin_user${COLOR_RESET}"
-    echo -e "${COLOR_YELLOW}Important: Test 2FA login in a new terminal before closing this session!${COLOR_RESET}"
-    echo "Command to test: ssh -o PreferredAuthentications=keyboard-interactive ${admin_user}@localhost"
+    # Verify setup
+    if ! verify_2fa_setup "$admin_user"; then
+        log "ERROR" "2FA verification failed"
+        exit 1
+    fi
+    
+    # Test configuration
+    if ! test_2fa_config("$admin_user"); then
+        log "ERROR" "2FA testing failed"
+        exit 1
+    fi
+    
+    log "SUCCESS" "2FA setup completed successfully for user: $admin_user"
+    echo -e "\n${COLOR_YELLOW}Important: Test 2FA login in a new terminal before closing this session!${COLOR_RESET}"
+    echo "Command to test: ssh ${admin_user}@localhost"
     
     return 0
 }
 
-# Run main function
+# Run main function with all arguments
 main "$@"

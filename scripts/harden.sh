@@ -1,50 +1,94 @@
 #!/bin/bash
+# Source common functions and initialize script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
-# Source common functions
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# Initialize variables with defaults
+declare -A CONFIG=(
+    [SSH_PORT]="22"
+    [SSH_ALLOW_USERS]=""
+    [ADMIN_EMAIL]="root@localhost"
+    [FIREWALL_ADDITIONAL_PORTS]="80,443"
+    [MFA_ENABLED]="yes"
+    [ENABLE_AUTO_UPDATES]="yes"
+    [ENABLE_IPV6]="no"
+)
 
-# Initialize script
-LOG_FILE="/var/log/server-hardening.log"
-init_script
+# Load and validate configuration
+load_configuration() {
+    local config_file="${1:-/etc/server-hardening/hardening.conf}"
+    
+    if [[ -f "$config_file" ]]; then
+        log "INFO" "Loading configuration from $config_file"
+        # shellcheck source=/dev/null
+        source "$config_file" || error_exit "Failed to load configuration"
+        
+        # Update CONFIG array with loaded values
+        CONFIG[SSH_PORT]=${SSH_PORT:-${CONFIG[SSH_PORT]}}
+        CONFIG[SSH_ALLOW_USERS]=${SSH_ALLOW_USERS:-${CONFIG[SSH_ALLOW_USERS]}}
+        CONFIG[ADMIN_EMAIL]=${ADMIN_EMAIL:-${CONFIG[ADMIN_EMAIL]}}
+        CONFIG[FIREWALL_ADDITIONAL_PORTS]=${FIREWALL_ADDITIONAL_PORTS:-${CONFIG[FIREWALL_ADDITIONAL_PORTS]}}
+        CONFIG[MFA_ENABLED]=${MFA_ENABLED:-${CONFIG[MFA_ENABLED]}}
+        CONFIG[ENABLE_AUTO_UPDATES]=${ENABLE_AUTO_UPDATES:-${CONFIG[ENABLE_AUTO_UPDATES]}}
+        CONFIG[ENABLE_IPV6]=${ENABLE_IPV6:-${CONFIG[ENABLE_IPV6]}}
+    fi
+    
+    # Validate configuration
+    validate_configuration
+}
 
-# Configuration variables with defaults
-SSH_PORT="3333"
-SSH_ALLOW_USERS="${SSH_ALLOW_USERS:-}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-}"
-FIREWALL_ADDITIONAL_PORTS="80,443,3306,465,587,993,995"
-MFA_ENABLED="yes"
-ENABLE_AUTO_UPDATES="yes"
-ENABLE_IPV6="no"
-
-# Load configuration if exists
-CONFIG_FILE="/etc/server-hardening/hardening.conf"
-if [[ -f "$CONFIG_FILE" ]]; then
-    log "INFO" "Loading configuration from $CONFIG_FILE"
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-fi
+validate_configuration() {
+    # Validate SSH port
+    if ! [[ "${CONFIG[SSH_PORT]}" =~ ^[0-9]+$ ]] || \
+       (( CONFIG[SSH_PORT] < 1 || CONFIG[SSH_PORT] > 65535 )); then
+        error_exit "Invalid SSH_PORT: '${CONFIG[SSH_PORT]}'. Must be between 1 and 65535"
+    fi
+    
+    # Validate SSH_ALLOW_USERS
+    if [[ -z "${CONFIG[SSH_ALLOW_USERS]}" ]]; then
+        error_exit "SSH_ALLOW_USERS must be configured"
+    fi
+    
+    # Validate email format
+    if [[ ! "${CONFIG[ADMIN_EMAIL]}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        error_exit "Invalid ADMIN_EMAIL format: ${CONFIG[ADMIN_EMAIL]}"
+    fi
+    
+    # Validate ports
+    local IFS=','
+    read -ra ports <<< "${CONFIG[FIREWALL_ADDITIONAL_PORTS]}"
+    for port in "${ports[@]}"; do
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+            error_exit "Invalid port in FIREWALL_ADDITIONAL_PORTS: '$port'"
+        fi
+    done
+    
+    # Validate yes/no options
+    local yes_no_vars=("MFA_ENABLED" "ENABLE_AUTO_UPDATES" "ENABLE_IPV6")
+    for var in "${yes_no_vars[@]}"; do
+        if [[ ! "${CONFIG[$var],,}" =~ ^(yes|no)$ ]]; then
+            error_exit "Invalid $var value: '${CONFIG[$var]}'. Must be 'yes' or 'no'"
+        fi
+    done
+}
 
 configure_ssh() {
     log "INFO" "Configuring SSH..."
     
-    # Backup SSH config
+    # Backup existing configuration
     backup_file "/etc/ssh/sshd_config"
     
-    # Check for SSH keys before disabling password auth
-    if [[ -n "$SSH_ALLOW_USERS" ]]; then
-        for user in $SSH_ALLOW_USERS; do
-            if ! check_ssh_key_setup "$user" 2>/dev/null; then
-                error_exit "User $user does not have SSH keys configured. Please run setup-ssh-key.sh first"
-            fi
-        done
-    else
-        error_exit "SSH_ALLOW_USERS must be configured"
-    fi
+    # Validate SSH keys for allowed users
+    for user in ${CONFIG[SSH_ALLOW_USERS]}; do
+        if ! check_ssh_key_setup "$user"; then
+            error_exit "User $user does not have SSH keys configured"
+        fi
+    done
     
-    # Generate new SSH config with proper variable expansion
+    # Generate new SSH config
     cat > "/etc/ssh/sshd_config" << EOF
 # Security hardened sshd_config
-Port $SSH_PORT
+Port ${CONFIG[SSH_PORT]}
 Protocol 2
 
 # Authentication
@@ -52,11 +96,11 @@ PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication no
 PermitEmptyPasswords no
-ChallengeResponseAuthentication ${MFA_ENABLED}
+ChallengeResponseAuthentication ${CONFIG[MFA_ENABLED]}
 UsePAM yes
 
 # Allow only specific users
-AllowUsers $SSH_ALLOW_USERS
+AllowUsers ${CONFIG[SSH_ALLOW_USERS]}
 
 # Security options
 X11Forwarding no
@@ -79,40 +123,57 @@ EOF
         error_exit "Invalid SSH configuration"
     fi
     
-    systemctl restart sshd
+    systemctl restart sshd || error_exit "Failed to restart SSH service"
 }
 
 configure_firewall() {
     log "INFO" "Configuring firewall..."
     
-    # Reset UFW
-    ufw --force reset
+    # Verify UFW is installed
+    if ! command -v ufw >/dev/null 2>&1; then
+        error_exit "UFW is not installed"
+    }
     
-    # Default policies
+    # Reset UFW with confirmation
+    if ! ufw --force reset; then
+        error_exit "Failed to reset UFW"
+    fi
+    
+    # Configure default policies
     ufw default deny incoming
     ufw default allow outgoing
     
     # Allow SSH
-    ufw allow "$SSH_PORT"/tcp
+    if ! ufw allow "${CONFIG[SSH_PORT]}"/tcp; then
+        error_exit "Failed to configure SSH port in firewall"
+    fi
     
     # Allow additional ports
-    IFS=',' read -ra PORTS <<< "$FIREWALL_ADDITIONAL_PORTS"
-    for port in "${PORTS[@]}"; do
-        ufw allow "$port"/tcp
+    local IFS=','
+    read -ra ports <<< "${CONFIG[FIREWALL_ADDITIONAL_PORTS]}"
+    for port in "${ports[@]}"; do
+        if ! ufw allow "$port"/tcp; then
+            log "WARNING" "Failed to add port $port to firewall"
+        fi
     done
     
     # Enable firewall
-    ufw --force enable
+    if ! ufw --force enable; then
+        error_exit "Failed to enable firewall"
+    fi
 }
 
 configure_fail2ban() {
     log "INFO" "Configuring fail2ban..."
     
-    # Backup fail2ban config
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        error_exit "fail2ban is not installed"
+    fi
+    
     backup_file "/etc/fail2ban/jail.local"
     
-    # Create custom configuration
-    cat > "/etc/fail2ban/jail.local" << 'EOF'
+    # Create fail2ban configuration
+    cat > "/etc/fail2ban/jail.local" << EOF
 [DEFAULT]
 bantime = 24h
 findtime = 48h
@@ -121,7 +182,7 @@ banaction = ufw
 
 [sshd]
 enabled = true
-port = ${SSH_PORT}
+port = ${CONFIG[SSH_PORT]}
 filter = sshd
 logpath = /var/log/auth.log
 maxretry = 3
@@ -129,24 +190,32 @@ findtime = 1h
 bantime = 24h
 EOF
     
-    systemctl restart fail2ban
+    if ! systemctl restart fail2ban; then
+        error_exit "Failed to restart fail2ban"
+    fi
 }
 
 configure_automatic_updates() {
+    [[ "${CONFIG[ENABLE_AUTO_UPDATES],,}" != "yes" ]] && return 0
+    
     log "INFO" "Configuring automatic updates..."
     
-    # Backup configuration
+    # Verify unattended-upgrades is installed
+    if ! dpkg -l | grep -q "^ii.*unattended-upgrades"; then
+        error_exit "unattended-upgrades is not installed"
+    fi
+    
     backup_file "/etc/apt/apt.conf.d/50unattended-upgrades"
     
     # Configure unattended upgrades
-    cat > "/etc/apt/apt.conf.d/50unattended-upgrades" << 'EOF'
+    cat > "/etc/apt/apt.conf.d/50unattended-upgrades" << EOF
 Unattended-Upgrade::Allowed-Origins {
-    "${distro_id}:${distro_codename}";
-    "${distro_id}:${distro_codename}-security";
-    "${distro_id}ESMApps:${distro_codename}-apps-security";
-    "${distro_id}ESM:${distro_codename}-infra-security";
+    "\${distro_id}:\${distro_codename}";
+    "\${distro_id}:\${distro_codename}-security";
+    "\${distro_id}ESMApps:\${distro_codename}-apps-security";
+    "\${distro_id}ESM:\${distro_codename}-infra-security";
 };
-Unattended-Upgrade::Mail "${ADMIN_EMAIL}";
+Unattended-Upgrade::Mail "${CONFIG[ADMIN_EMAIL]}";
 Unattended-Upgrade::MailReport "on-change";
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
@@ -155,7 +224,7 @@ Unattended-Upgrade::Automatic-Reboot-Time "02:00";
 EOF
     
     # Enable automatic updates
-    cat > "/etc/apt/apt.conf.d/20auto-upgrades" << 'EOF'
+    cat > "/etc/apt/apt.conf.d/20auto-upgrades" << EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::AutocleanInterval "7";
@@ -166,11 +235,10 @@ EOF
 configure_sysctl() {
     log "INFO" "Configuring system security settings..."
     
-    # Backup sysctl config
     backup_file "/etc/sysctl.conf"
     
     # Configure kernel parameters
-    cat > "/etc/sysctl.d/99-security.conf" << 'EOF'
+    cat > "/etc/sysctl.d/99-security.conf" << EOF
 # Network security
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
@@ -182,9 +250,9 @@ net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
 
 # IPv6 settings
-net.ipv6.conf.all.disable_ipv6 = ${ENABLE_IPV6//yes/0}
-net.ipv6.conf.default.disable_ipv6 = ${ENABLE_IPV6//yes/0}
-net.ipv6.conf.lo.disable_ipv6 = ${ENABLE_IPV6//yes/0}
+net.ipv6.conf.all.disable_ipv6 = ${CONFIG[ENABLE_IPV6],,}
+net.ipv6.conf.default.disable_ipv6 = ${CONFIG[ENABLE_IPV6],,}
+net.ipv6.conf.lo.disable_ipv6 = ${CONFIG[ENABLE_IPV6],,}
 
 # System security
 kernel.sysrq = 0
@@ -201,310 +269,40 @@ net.ipv4.conf.default.rp_filter = 1
 net.ipv4.tcp_syncookies = 1
 EOF
     
-    # Apply changes
-    sysctl -p /etc/sysctl.d/99-security.conf
-}
-
-# Function to validate PAM configuration with timeout
-validate_pam_config() {
-    local config_file="$1"
-    local timeout=5
-    
-    # Run pamtester with timeout
-    if timeout "$timeout" pamtester -v sudo TEST authenticate 2>/dev/null; then
-        return 0
+    if ! sysctl -p /etc/sysctl.d/99-security.conf; then
+        error_exit "Failed to apply sysctl settings"
     fi
-    
-    # Check if file exists and has basic required entries
-    if ! grep -q "^auth.*pam_unix.so" "$config_file" || \
-       ! grep -q "^@include common-auth" "$config_file"; then
-        return 1
-    fi
-    
-    # If basic checks pass, assume it's okay
-    return 0
-}
-
-configure_pam() {
-    log "INFO" "Configuring PAM for sudo and su..."
-    
-    # Backup PAM files first
-    backup_file "/etc/pam.d/sudo"
-    backup_file "/etc/pam.d/su"
-    
-    # Create a minimal but reliable sudo PAM config
-    cat > "/etc/pam.d/sudo" << 'EOF'
-#%PAM-1.0
-auth       include      common-auth
-account    include      common-account
-password   include      common-password
-session    required     pam_env.so readenv=1 user_readenv=0
-session    required     pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
-session    required     pam_unix.so
-session    include      common-session
-EOF
-    chmod 644 "/etc/pam.d/sudo"
-    
-    # Create minimal su PAM config
-    cat > "/etc/pam.d/su" << 'EOF'
-#%PAM-1.0
-auth       sufficient   pam_rootok.so
-auth       required     pam_unix.so
-account    required     pam_unix.so
-session    required     pam_unix.so
-session    include      common-session
-EOF
-    chmod 644 "/etc/pam.d/su"
-    
-    # Create or update common-auth if needed
-    if [[ ! -f "/etc/pam.d/common-auth" ]]; then
-        cat > "/etc/pam.d/common-auth" << 'EOF'
-#%PAM-1.0
-auth    [success=1 default=ignore]  pam_unix.so nullok_secure try_first_pass
-auth    requisite                   pam_deny.so
-auth    required                    pam_permit.so
-EOF
-        chmod 644 "/etc/pam.d/common-auth"
-    fi
-    
-    log "SUCCESS" "PAM configuration updated"
-    return 0
-}
-
-configure_sudo() {
-    log "INFO" "Configuring sudo policies..."
-    
-    # Create temporary files for validation first
-    local temp_sudo_config=$(mktemp)
-    
-    # Basic sudo configuration that works reliably with passwords
-    cat > "$temp_sudo_config" << 'EOF'
-# Basic sudo configuration
-Defaults        env_reset
-Defaults        mail_badpass
-Defaults        timestamp_timeout=15
-Defaults        passwd_tries=3
-Defaults        authenticate
-
-# Allow sudo group access with password
-%sudo   ALL=(ALL:ALL) ALL
-
-# This prevents SSH sessions timing out when using sudo
-Defaults        env_keep += "SSH_AUTH_SOCK"
-
-# This allows sudo group members to run sudo without a password for some basic commands
-%sudo   ALL=(ALL) NOPASSWD: /usr/bin/sudo -l, /usr/bin/sudo -v, /usr/bin/id
-
-# Keep a minimal secure environment
-Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-EOF
-
-    # Validate syntax before installing
-    if ! visudo -c -f "$temp_sudo_config" >/dev/null 2>&1; then
-        log "ERROR" "Invalid sudo configuration"
-        rm -f "$temp_sudo_config"
-        return 1
-    fi
-
-    # Install configuration
-    mv "$temp_sudo_config" "/etc/sudoers.d/01-sudo-config"
-    chmod 440 "/etc/sudoers.d/01-sudo-config"
-
-    # Fix permissions on sudo-related files
-    chmod 755 /usr/bin/sudo || true
-    chmod 440 /etc/sudoers || true
-    chmod 750 /etc/sudoers.d || true
-
-    log "SUCCESS" "Sudo configuration updated"
-    return 0
-}
-
-restore_from_backup() {
-    local file="$1"
-    local latest_backup
-    
-    latest_backup=$(find "$(dirname "$file")" -name "$(basename "$file").*.bak" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2)
-    
-    if [[ -n "$latest_backup" ]]; then
-        log "INFO" "Restoring $file from $latest_backup"
-        cp -p "$latest_backup" "$file"
-        return 0
-    fi
-    
-    return 1
-}
-
-cleanup_hung_processes() {
-    log "INFO" "Checking for hung processes..."
-    
-    # Check for hung pam-auth processes
-    local pam_pids
-    pam_pids=$(pgrep -f "pam.*auth" 2>/dev/null || true)
-    if [[ -n "$pam_pids" ]]; then
-        log "WARNING" "Found hung PAM processes, cleaning up..."
-        kill -9 $pam_pids 2>/dev/null || true
-    fi
-    
-    # Check for hung sudo processes
-    local sudo_pids
-    sudo_pids=$(pgrep -f "sudo.*true" 2>/dev/null || true)
-    if [[ -n "$sudo_pids" ]]; then
-        log "WARNING" "Found hung sudo processes, cleaning up..."
-        kill -9 $sudo_pids 2>/dev/null || true
-    fi
-    
-    # Remove any stale locks
-    rm -f /var/run/sudo/ts/* 2>/dev/null || true
-    
-    return 0
-}
-
-# Helper function to ensure we have a valid configuration
-ensure_hardening_config() {
-    local config_file="/etc/server-hardening/hardening.conf"
-    
-    # Set default values
-    SSH_PORT=${SSH_PORT:-22}
-    SSH_ALLOW_USERS=${SSH_ALLOW_USERS:-}
-    ADMIN_EMAIL=${ADMIN_EMAIL:-root@localhost}
-    FIREWALL_ADDITIONAL_PORTS=${FIREWALL_ADDITIONAL_PORTS:-"80,443"}
-    MFA_ENABLED=${MFA_ENABLED:-yes}
-    ENABLE_AUTO_UPDATES=${ENABLE_AUTO_UPDATES:-yes}
-    ENABLE_IPV6=${ENABLE_IPV6:-no}
-    
-    # Try to load config if it exists
-    if [[ -f "$config_file" ]]; then
-        # shellcheck source=/dev/null
-        source "$config_file" || true
-    fi
-    
-    # Export variables so they're available to subshells
-    export SSH_PORT SSH_ALLOW_USERS ADMIN_EMAIL FIREWALL_ADDITIONAL_PORTS
-    export MFA_ENABLED ENABLE_AUTO_UPDATES ENABLE_IPV6
 }
 
 main() {
-    # Add cleanup trap
-    trap cleanup_hung_processes EXIT
+    # Initialize script
+    init_script
     
-    # Ensure we have configuration values before anything else
-    ensure_hardening_config
+    # Load configuration
+    load_configuration "/etc/server-hardening/hardening.conf"
+    
+    # Perform hardening steps with error handling
+    configure_ssh
+    configure_firewall
+    configure_fail2ban
+    configure_automatic_updates
+    configure_sysctl
+    
+    log "SUCCESS" "System hardening completed successfully"
+    
+    # Print verification instructions
+    cat << EOF
+================================================================
+System hardening complete. Please verify:
+1. SSH access works on port ${CONFIG[SSH_PORT]}
+2. Firewall is active and configured correctly
+3. fail2ban is running and monitoring SSH
+4. Automatic updates are properly configured
+5. System security settings are applied
 
-    if [[ "${1:-}" == "--restore" ]]; then
-        log "INFO" "Restoring configuration from backups..."
-        restore_from_backup "/etc/ssh/sshd_config" && systemctl restart sshd
-        restore_from_backup "/etc/fail2ban/jail.local" && systemctl restart fail2ban
-        restore_from_backup "/etc/apt/apt.conf.d/50unattended-upgrades"
-        restore_from_backup "/etc/sysctl.conf" && sysctl -p
-        log "INFO" "Restore completed"
-        exit 0
-    fi
-    
-    # Create necessary directories
-    mkdir -p "/etc/server-hardening"
-    
-    # Set default config path
-    CONFIG_FILE="${CONFIG_FILE:-/etc/server-hardening/hardening.conf}"
-    
-    # If no config exists, copy example and prompt for review
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        local example_config="$(dirname "${BASH_SOURCE[0]}")/../examples/config/hardening.conf.example"
-        if [[ ! -f "$example_config" ]]; then
-            error_exit "Example configuration file not found: $example_config"
-        fi
-        
-        # Copy example config
-        cp "$example_config" "$CONFIG_FILE" || error_exit "Failed to copy example config"
-        chmod 600 "$CONFIG_FILE"
-        
-        # Show configuration and prompt for review
-        echo "================================================================"
-        echo "No configuration file found. Default configuration:"
-        echo "----------------------------------------------------------------"
-        cat "$CONFIG_FILE"
-        echo "----------------------------------------------------------------"
-        echo "Please review the configuration above."
-        echo "You can:"
-        echo "1. Continue with these default settings"
-        echo "2. Exit, edit $CONFIG_FILE, and run again"
-        echo "================================================================"
-        
-        if ! prompt_yes_no "Would you like to continue with default settings" "no"; then
-            log "INFO" "Please edit $CONFIG_FILE and run this script again"
-            exit 0
-        fi
-        
-        log "INFO" "Proceeding with default configuration"
-    fi
-    
-    # Source configuration file
-    log "INFO" "Loading configuration from $CONFIG_FILE"
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE" || error_exit "Failed to load configuration"
-    
-    # Validate required settings and their formats
-    # Validate SSH port
-    if [[ -z "${SSH_PORT}" ]]; then
-        error_exit "Required configuration variable SSH_PORT is not set in $CONFIG_FILE"
-    fi
-    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
-        error_exit "Invalid SSH_PORT: '$SSH_PORT'. Must be a number between 1 and 65535"
-    fi
-    
-    # Validate SSH allow users
-    if [[ -z "${SSH_ALLOW_USERS}" ]]; then
-        error_exit "Required configuration variable SSH_ALLOW_USERS is not set in $CONFIG_FILE"
-    fi
-    
-    # Validate firewall ports
-    if [[ -z "${FIREWALL_ADDITIONAL_PORTS}" ]]; then
-        error_exit "Required configuration variable FIREWALL_ADDITIONAL_PORTS is not set in $CONFIG_FILE"
-    fi
-    for port in $(echo "$FIREWALL_ADDITIONAL_PORTS" | tr ',' ' '); do
-        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-            error_exit "Invalid port in FIREWALL_ADDITIONAL_PORTS: '$port'. Must be a number between 1 and 65535"
-        fi
-    done
-    
-    # Convert yes/no settings to proper format
-    MFA_ENABLED=$(echo "${MFA_ENABLED:-yes}" | tr '[:upper:]' '[:lower:]')
-    ENABLE_AUTO_UPDATES=$(echo "${ENABLE_AUTO_UPDATES:-yes}" | tr '[:upper:]' '[:lower:]')
-    ENABLE_IPV6=$(echo "${ENABLE_IPV6:-no}" | tr '[:upper:]' '[:lower:]')
-    
-    # Validate yes/no settings
-    for var in MFA_ENABLED ENABLE_AUTO_UPDATES ENABLE_IPV6; do
-        if [[ ! "${!var}" =~ ^(yes|no)$ ]]; then
-            error_exit "Invalid value for $var: '${!var}'. Must be 'yes' or 'no'"
-        fi
-    done
-    
-    # Perform hardening with timeout handling for problematic steps
-    configure_ssh || error_exit "Failed to configure SSH"
-    configure_firewall || error_exit "Failed to configure firewall"
-    configure_fail2ban || error_exit "Failed to configure fail2ban"
-    configure_automatic_updates || error_exit "Failed to configure automatic updates"
-    configure_sysctl || error_exit "Failed to configure sysctl"
-    
-    # Handle PAM and sudo configuration with fallback options
-    if ! timeout 60 bash -c 'configure_pam'; then
-        log "WARNING" "PAM configuration timed out or failed, using basic configuration"
-        # Set up minimal PAM config
-        echo -e "auth\trequired\tpam_unix.so\n@include common-auth" > "/etc/pam.d/sudo"
-        chmod 644 "/etc/pam.d/sudo"
-    fi
-    
-    configure_sudo || log "WARNING" "Sudo configuration had issues, manual verification recommended"
-    
-    log "INFO" "System hardening completed successfully"
-    echo "================================================================"
-    echo "System hardening complete. Please verify:"
-    echo "1. SSH access works on port $SSH_PORT"
-    echo "2. Firewall is active with correct rules"
-    echo "3. fail2ban is running"
-    echo "4. Automatic updates are configured"
-    echo "5. User switching works without authentication for sudo users"
-    echo "    Example: su - otheruser (should work without password)"
-    echo "================================================================"
+Run verify-system.sh to perform automated verification
+================================================================
+EOF
 }
 
 main "$@"
